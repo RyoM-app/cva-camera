@@ -1,22 +1,27 @@
 'use strict';
-// CVAカメラ 0.2.0 — 1人で使える側面CVA計測
-// 流れ：内カメラを開始 → セルフタイマーで1枚撮影 → 写真の上でマーカーをタップ → 記録スタート（ライブ映像で追跡）
+// CVAカメラ 0.3.0 — 1人で使える側面CVA計測
+// 流れ：カメラを開始 → セルフタイマーで1枚撮影 → 写真の上でマーカーをタップ → 記録スタート（ライブ映像で追跡）
+// 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const $ = id => document.getElementById(id);
 const video = $('video'), snap = $('snap'), overlay = $('overlay'), octx = overlay.getContext('2d');
 const proc = document.createElement('canvas'), pctx = proc.getContext('2d', { willReadFrequently: true });
+const comp = document.createElement('canvas'), cctx = comp.getContext('2d');   // 映像の保存用（計測結果を重ねる）
 const NAMES = { tragus: '耳珠', c7: 'C7', acromion: '肩峰' };
 const RING = { tragus: '#e04a3f', c7: '#e9a23b', acromion: '#2f6f8f' };
 const PROTOCOL = ['基準', 'うつむく', '顎を突き出す', '目線だけ下げる', '基準'];
 const SAY = { '基準': '楽な姿勢で、正面を見てください', 'うつむく': 'スマホを見るように、うつむいてください', '顎を突き出す': '顎を前に突き出してください', '目線だけ下げる': '頭は動かさず、目線だけを下げてください' };
+const NOD = { drop: 6, back: 3, startMax: 8000, endMax: 12000, after: 1500 };   // うなずき：基準から6°以上下がり、3°以内に戻ったら検出
 
 const S = {
   stream: null, running: false, phase: 'idle',   // idle | live | frozen | countdown | recording
-  target: 'tragus', label: '基準', showMask: false,
-  markers: {}, level: [], roll: 0, facing: 1,
+  cam: 'user', target: 'tragus', label: '基準', showMask: false,
+  stage: 'manual', rowLabel: '基準', step: -1,    // 記録中の区間（prep | nod | guide | transition | hold | manual）
+  markers: {}, level: [], roll: 0, rollSrc: 'none', sensorRoll: null, snapGrav: null, facing: 1,
+  grav: null, gravHist: [], devRoll: null, devPitch: null, lastMotion: 0,
   k: 1, img: null, snapImg: null, fps: 0, lastT: 0, frame: 0,
-  tilt: null, rec: null, last: null, timers: [],
+  rec: null, last: null, timers: [], nodWatch: null, vr: null, lastVideo: null,
   hTol: 18, minArea: 8, procLong: 640,
 };
 
@@ -35,6 +40,16 @@ function say(text) {
   if (!text) return;
   try { const u = new SpeechSynthesisUtterance(text); u.lang = 'ja-JP'; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) {}
 }
+// 読み上げが終わるまで待つ（終わりの通知が来ない端末に備えて、文の長さから上限を決める）
+function sayWait(text) {
+  const t0 = performance.now();
+  return new Promise(res => {
+    let done = false; const fin = () => { if (!done) { done = true; res(); } };
+    try { const u = new SpeechSynthesisUtterance(text); u.lang = 'ja-JP'; u.onend = fin; u.onerror = fin; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) { fin(); }
+    S.timers.push(setTimeout(fin, 1000 + text.length * 250));
+  }).then(() => sleep(Math.max(0, t0 + text.length * 110 - performance.now())));   // 終わりの通知が早すぎる端末でも、読み上げにかかる時間は案内中にする
+}
+const sleep = ms => new Promise(r => S.timers.push(setTimeout(r, ms)));
 function countdown(sec, done) {
   const el = $('countdown');
   if (sec <= 0) { el.hidden = true; done(); return; }
@@ -45,6 +60,42 @@ function countdown(sec, done) {
     else { el.textContent = n; beep(660, 120); }
   }, 1000);
   S.timers.push(id);
+}
+
+// ---------------------------------------------------------------- 重力センサー（端末の傾き）
+// 端末の座標（x：画面の右、y：画面の上、z：画面の手前）での重力の反力 g から、
+//   左右の傾き θ = atan2(-gx, gy)（画面を見て時計回りが正）、前後の傾き = atan2(gz, gy)（画面が上を向くほど正）
+// 内カメラ（左右反転なし）の画像では、本当の水平線が θ だけ傾いて写る。外カメラでは -θ。
+function onGrav(x, y, z, src) {
+  if (x === null || y === null || x === undefined) return;
+  let gx = x, gy = y, gz = z || 0;
+  if (gy < 0) { gx = -gx; gy = -gy; gz = -gz; }   // 符号が逆の端末（一部のiOS）でも、端末を縦に立てている前提で揃える
+  const t = performance.now();
+  S.grav = { x: +x, y: +y, z: +(z || 0), src };
+  S.devRoll = Math.atan2(-gx, gy) * 180 / Math.PI;
+  S.devPitch = Math.atan2(gz, gy) * 180 / Math.PI;
+  S.gravHist.push([t, S.devRoll]); while (S.gravHist.length && S.gravHist[0][0] < t - 2000) S.gravHist.shift();
+}
+function sensorImgRoll(devRoll) { return devRoll === null ? null : (S.cam === 'user' ? devRoll : -devRoll); }
+function meanRoll(ms = 1000) {
+  const t = performance.now(), v = S.gravHist.filter(h => h[0] >= t - ms).map(h => h[1]);
+  return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+}
+let sensorsOn = false;
+async function startSensors() {
+  try { if (typeof DeviceMotionEvent !== 'undefined' && DeviceMotionEvent.requestPermission) await DeviceMotionEvent.requestPermission(); } catch (e) {}
+  try { if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission(); } catch (e) {}
+  if (sensorsOn) return; sensorsOn = true;
+  addEventListener('devicemotion', e => {
+    const g = e.accelerationIncludingGravity; if (!g || g.x === null || g.y === null) return;
+    if (g.x === 0 && g.y === 0 && (g.z === 0 || g.z === null)) return;   // 値が来ていない
+    S.lastMotion = performance.now(); onGrav(g.x, g.y, g.z, 'devicemotion');
+  });
+  addEventListener('deviceorientation', e => {   // 加速度が使えない端末の代わり
+    if (performance.now() - S.lastMotion < 500 || e.beta === null || e.gamma === null) return;
+    const b = e.beta * Math.PI / 180, c = e.gamma * Math.PI / 180;
+    onGrav(-9.81 * Math.cos(b) * Math.sin(c), 9.81 * Math.sin(b), 9.81 * Math.cos(b) * Math.cos(c), 'deviceorientation');
+  });
 }
 
 // ---------------------------------------------------------------- 色
@@ -126,11 +177,19 @@ function layout() {
   S.view = { s, ox: (r.width - vw * s) / 2, oy: (r.height - vh * s) / 2, dpr };
 }
 function toVideo(ev) { const r = overlay.getBoundingClientRect(), v = S.view; return [(ev.clientX - r.left - v.ox) / v.s, (ev.clientY - r.top - v.oy) / v.s]; }
+function hline(ctx, deg, color, lw, dash) {   // 画像の中心を通り、deg だけ傾いた線
+  const W = video.videoWidth, H = video.videoHeight, a = deg * Math.PI / 180, L = Math.hypot(W, H);
+  ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.moveTo(W / 2 - L * Math.cos(a), H / 2 - L * Math.sin(a)); ctx.lineTo(W / 2 + L * Math.cos(a), H / 2 + L * Math.sin(a)); ctx.stroke(); ctx.restore();
+}
 function draw(ang) {
   const v = S.view; if (!v) return;
   octx.setTransform(1, 0, 0, 1, 0, 0); octx.clearRect(0, 0, overlay.width, overlay.height);
   octx.setTransform(v.dpr * v.s, 0, 0, v.dpr * v.s, v.dpr * v.ox, v.dpr * v.oy);
   const lw = 2 / v.s, img = S.phase === 'frozen' ? S.snapImg : S.img;
+  // センサーから求めた水平線（点線）：撮影前はいまの傾き、写真では補正に使う傾き
+  const sr = S.phase === 'live' ? sensorImgRoll(S.devRoll) : S.phase === 'frozen' ? sensorImgRoll(S.sensorRoll) : null;
+  if (sr !== null) hline(octx, sr, 'rgba(80,220,255,.9)', lw, [10 / v.s, 8 / v.s]);
   if (S.showMask && img) {
     const { width: W, height: H, data } = img, md = new ImageData(W, H);
     for (const mk of Object.values(S.markers)) for (let i = 0; i < data.length; i += 4) if (matches(data, i, mk.color)) { md.data[i] = 255; md.data[i + 2] = 255; md.data[i + 3] = 150; }
@@ -162,8 +221,10 @@ function readouts(ang) {
   const chip = (id, n) => { const mk = S.markers[n]; $(id).textContent = `${NAMES[n]}：${!mk ? '未設定' : mk.pos ? '検出' : (S.phase === 'recording' ? '見失い' : '設定済み')}`; };
   chip('chipT', 'tragus'); chip('chipC', 'c7'); chip('chipA', 'acromion');
   $('chipFps').textContent = S.phase === 'frozen' ? '写真' : `${S.fps.toFixed(0)} fps`;
-  $('chipTilt').textContent = S.tilt === null ? '端末の傾き：—' : `端末の傾き：${S.tilt.toFixed(1)}°`;
-  $('modeLabel').textContent = { idle: '待機中', live: 'ライブ映像', frozen: '撮影した写真（タップで指定）', countdown: 'まもなく記録開始', recording: `記録中：${S.label}` }[S.phase];
+  $('chipTilt').textContent = S.devRoll === null ? '端末の傾き：センサーなし' : `端末の傾き：左右 ${S.devRoll.toFixed(1)}°・前後 ${S.devPitch.toFixed(1)}°`;
+  $('chipTilt').classList.toggle('warn', S.devRoll !== null && (Math.abs(S.devRoll) > 5 || Math.abs(S.devPitch) > 10));
+  const tgt = S.rec && S.stage !== 'hold' && S.stage !== 'manual' && S.label && S.step >= 0 && S.step < PROTOCOL.length ? `（次：${PROTOCOL[S.step]}）` : '';
+  $('modeLabel').textContent = { idle: '待機中', live: 'ライブ映像', frozen: '撮影した写真（タップで指定）', countdown: 'まもなく記録開始', recording: `記録中：${S.rowLabel}${tgt}` }[S.phase];
 }
 function setPhase(p) {
   S.phase = p;
@@ -175,6 +236,7 @@ function setPhase(p) {
   $('recBtn').disabled = !(busy || (frozen && S.markers.tragus && S.markers.c7));
   $('recBtn').textContent = busy ? '記録停止' : '記録スタート';
   $('syncBtn').disabled = p !== 'recording';
+  $('camSel').disabled = $('vidMode').disabled = busy;
 }
 
 // ---------------------------------------------------------------- フレーム処理
@@ -198,43 +260,109 @@ function loop(now, meta) {
       const ang = rec ? angles() : { cva: null, wat: null };
       draw(ang); readouts(ang);
       const t = performance.now(); if (S.lastT) S.fps = 0.9 * S.fps + 0.1 * (1000 / (t - S.lastT)); S.lastT = t; S.frame++;
-      if (rec) record(t, meta, ang);
+      if (rec) { record(t, meta, ang); watchNod(t, ang.cva); }
+      if (S.vr && S.vr.mode === 'overlay') composite(ang, t);
     }
   }
   video.requestVideoFrameCallback ? video.requestVideoFrameCallback(loop) : requestAnimationFrame(t => loop(t, null));
 }
 function record(t, meta, ang) {
   const cap = meta && meta.captureTime ? meta.captureTime : null;
-  const row = { epoch_ms: +(performance.timeOrigin + t).toFixed(1), perf_ms: +t.toFixed(1), capture_perf_ms: cap === null ? '' : +cap.toFixed(1), media_time_s: meta ? +meta.mediaTime.toFixed(4) : '', frame: S.frame, label: S.label };
+  const target = S.stage === 'manual' ? S.label : (S.step >= 0 && S.step < PROTOCOL.length && ['guide', 'transition', 'hold'].includes(S.stage) ? PROTOCOL[S.step] : '');
+  const row = { epoch_ms: +(performance.timeOrigin + t).toFixed(1), perf_ms: +t.toFixed(1), capture_perf_ms: cap === null ? '' : +cap.toFixed(1), media_time_s: meta ? +meta.mediaTime.toFixed(4) : '', frame: S.frame,
+    label: S.rowLabel, target_label: target, stage: S.stage, step: S.step };
   for (const n of ['tragus', 'c7', 'acromion']) {
     const mk = S.markers[n];
     row[`${n}_x`] = mk && mk.pos ? +mk.pos[0].toFixed(2) : ''; row[`${n}_y`] = mk && mk.pos ? +mk.pos[1].toFixed(2) : ''; row[`${n}_area`] = mk && mk.pos ? Math.round(mk.area) : '';
   }
   row.cva_deg = ang.cva === null ? '' : +ang.cva.toFixed(2); row.watanabe_deg = ang.wat === null ? '' : +ang.wat.toFixed(2);
-  row.valid = ang.cva === null ? 0 : 1; row.device_tilt_deg = S.tilt === null ? '' : +S.tilt.toFixed(2);
+  row.valid = ang.cva === null ? 0 : 1;
+  row.device_roll_deg = S.devRoll === null ? '' : +S.devRoll.toFixed(2); row.device_pitch_deg = S.devPitch === null ? '' : +S.devPitch.toFixed(2);
   S.rec.rows.push(row);
-  if (S.rec.rows.length % 15 === 0) $('recStatus').textContent = `記録中：${S.rec.rows.length}行（${((t - S.rec.t0) / 1000).toFixed(0)}秒）・${S.label}`;
+  if (S.rec.rows.length % 15 === 0) $('recStatus').textContent = `記録中：${S.rec.rows.length}行（${((t - S.rec.t0) / 1000).toFixed(0)}秒）・${S.rowLabel}`;
+}
+
+// ---------------------------------------------------------------- うなずきの検出
+// 合図の直前1.5秒のCVAの中央値を基準にし、そこから NOD.drop 度以上下がって、NOD.back 度以内に戻ったら検出。
+function startNodWatch(which) {
+  const t = performance.now(), prev = S.rec.rows.filter(r => r.valid && r.perf_ms >= t - 1500).map(r => r.cva_deg).sort((a, b) => a - b);
+  return new Promise(res => { S.nodWatch = { which, t0: t, base: prev.length >= 3 ? prev[prev.length >> 1] : null, min: Infinity, minT: null, deep: false, res }; });
+}
+function watchNod(t, cva) {
+  const w = S.nodWatch; if (!w || cva === null) return;
+  if (w.base === null) { w.base = cva; return; }   // 直前のデータがなければ、最初の値を基準にする
+  if (cva < w.min) { w.min = cva; w.minT = t; }
+  if (w.base - cva >= NOD.drop) w.deep = true;
+  if (w.deep && cva >= w.base - NOD.back) {
+    S.rec.events.push(ev('nod_detected', { which: w.which, base_cva: +w.base.toFixed(2), min_cva: +w.min.toFixed(2), depth_deg: +(w.base - w.min).toFixed(2),
+      min_epoch_ms: +(performance.timeOrigin + w.minT).toFixed(1), latency_ms: Math.round(w.minT - w.t0) }));
+    S.nodWatch = null; beep(1400, 80); w.res(true);
+  }
+}
+function nodOrTimeout(which, max) {
+  const p = startNodWatch(which);
+  return Promise.race([p, sleep(max).then(() => false)]).then(ok => { if (!ok && S.nodWatch) { S.rec?.events.push(ev('nod_timeout', { which })); S.nodWatch = null; } return ok; });
+}
+
+// ---------------------------------------------------------------- 映像の保存（任意）
+function pickMime() {
+  if (typeof MediaRecorder === 'undefined') return null;
+  return ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported?.(m)) || '';
+}
+function startVideo() {
+  const mode = $('vidMode').value; S.lastVideo = null; $('videoBtn').disabled = true;
+  if (mode === 'none') return;
+  const mime = pickMime(); if (mime === null) { setStatus('このブラウザは映像の保存に対応していません。データだけ記録します。', true); return; }
+  let stream;
+  if (mode === 'overlay') {
+    const sc = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
+    comp.width = Math.round(video.videoWidth * sc); comp.height = Math.round(video.videoHeight * sc);
+    stream = comp.captureStream(30);
+  } else stream = S.stream;
+  const mr = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 4e6 } : { videoBitsPerSecond: 4e6 }), chunks = [];
+  S.vr = { mode, mime: mime || mr.mimeType, mr, chunks, startEpoch: null };
+  mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onstart = () => { S.vr.startEpoch = +(performance.timeOrigin + performance.now()).toFixed(1); S.rec?.events.push(ev('video_start', { mode })); };
+  mr.start(1000);
+}
+function stopVideo() {
+  const vr = S.vr; if (!vr) return; S.vr = null;
+  vr.mr.onstop = () => {
+    const type = vr.mime || vr.chunks[0]?.type || 'video/webm', blob = new Blob(vr.chunks, { type });
+    S.lastVideo = { blob, ext: type.includes('mp4') ? 'mp4' : 'webm', mode: vr.mode, mime: type, startEpoch: vr.startEpoch, bytes: blob.size };
+    $('videoBtn').disabled = false; $('videoBtn').textContent = `映像を保存（${(blob.size / 1e6).toFixed(1)} MB）`;
+  };
+  try { vr.mr.stop(); } catch (e) {}
+}
+function composite(ang, t) {
+  const v = S.view; if (!v) return;
+  const W = comp.width, H = comp.height;
+  cctx.drawImage(video, 0, 0, W, H);
+  cctx.drawImage(overlay, v.ox * v.dpr, v.oy * v.dpr, video.videoWidth * v.s * v.dpr, video.videoHeight * v.s * v.dpr, 0, 0, W, H);
+  const fs = Math.round(Math.max(14, H * 0.032)), lines = [
+    `CVA ${ang.cva === null ? '—' : ang.cva.toFixed(1) + '°'}   渡邉角 ${ang.wat === null ? '—' : ang.wat.toFixed(1) + '°'}`,
+    `${S.rowLabel}${S.stage === 'guide' || S.stage === 'transition' ? '（次：' + (PROTOCOL[S.step] || '') + '）' : ''}`,
+    `${((t - S.rec.t0) / 1000).toFixed(1)} s`];
+  cctx.font = `600 ${fs}px system-ui, sans-serif`;
+  const bw = Math.max(...lines.map(l => cctx.measureText(l).width)) + fs;
+  cctx.fillStyle = 'rgba(0,0,0,.55)'; cctx.fillRect(0, 0, bw, fs * (lines.length + 0.6));
+  cctx.fillStyle = '#fff'; lines.forEach((l, i) => cctx.fillText(l, fs / 2, fs * (i + 1.1)));
 }
 
 // ---------------------------------------------------------------- 操作
 async function start() {
   beep(440, 1);   // iOSで音を鳴らせるよう、ユーザー操作の中で初期化
+  await startSensors();   // iOSはユーザー操作の中で許可を求める必要がある
+  S.cam = $('camSel').value;
   try {
-    S.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    S.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: S.cam, width: { ideal: 1920 }, height: { ideal: 1080 } } });
   } catch (e) { setStatus('カメラを開始できません：' + e.message, true); return; }
   video.srcObject = S.stream; await video.play();
   $('previewHint').hidden = true; S.running = true; layout(); setPhase('live');
   $('startBtn').disabled = true; $('stopBtn').disabled = false;
   const st = S.stream.getVideoTracks()[0].getSettings();
-  setStatus(`内カメラ：${st.width}×${st.height}、${st.frameRate ? st.frameRate.toFixed(0) : '?'} fps。画面は左右反転していません（記録と同じ向き）。`);
+  setStatus(`${S.cam === 'user' ? '内' : '外'}カメラ：${st.width}×${st.height}、${st.frameRate ? st.frameRate.toFixed(0) : '?'} fps。画面は左右反転していません（記録と同じ向き）。水色の点線が、センサーで求めた水平です。`);
   try { if ('wakeLock' in navigator) S.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
-  try {
-    if (typeof DeviceMotionEvent !== 'undefined' && DeviceMotionEvent.requestPermission) await DeviceMotionEvent.requestPermission();
-    addEventListener('devicemotion', e => {
-      const g = e.accelerationIncludingGravity; if (!g || g.x === null) return;
-      const a = Math.atan2(g.x, g.y) * 180 / Math.PI; S.tilt = ((a + 45) % 90 + 90) % 90 - 45;   // 縦・横の軸からのずれ
-    });
-  } catch (e) {}
   video.requestVideoFrameCallback ? video.requestVideoFrameCallback(loop) : requestAnimationFrame(t => loop(t, null));
 }
 function stopCamera() {
@@ -244,6 +372,13 @@ function stopCamera() {
 }
 function setStatus(m, err) { $('status').textContent = m; $('status').classList.toggle('error', !!err); }
 
+function applySensorRoll() {
+  if (S.sensorRoll === null) { S.roll = 0; S.rollSrc = 'none'; return; }
+  S.roll = sensorImgRoll(S.sensorRoll); S.rollSrc = 'sensor';
+}
+function rollText() {
+  return S.rollSrc === 'sensor' ? `傾き補正：センサー ${S.roll.toFixed(1)}°` : S.rollSrc === 'manual' ? `傾き補正：手動の水平線 ${S.roll.toFixed(1)}°` : '傾き補正：なし（センサーが使えません）';
+}
 function takeSnapshot() {
   if (S.phase === 'frozen') setPhase('live');
   $('snapBtn').disabled = true; $('retakeBtn').disabled = true;
@@ -253,10 +388,12 @@ function takeSnapshot() {
     const img = grab(); if (!img) return;
     S.snapImg = img; S.img = img;
     snap.width = video.videoWidth; snap.height = video.videoHeight; snap.getContext('2d').drawImage(video, 0, 0);
-    S.markers = {}; S.level = []; S.roll = 0;
+    S.markers = {}; S.level = [];
+    S.sensorRoll = meanRoll(1000); S.snapGrav = S.grav ? { ...S.grav, devRoll: S.devRoll, devPitch: S.devPitch } : null; applySensorRoll();
     setPhase('frozen'); selectTarget('tragus'); draw({ cva: null, wat: null }); readouts({ cva: null, wat: null });
     say('撮影しました。写真のマーカーをタップしてください');
-    setStatus('撮影しました。写真の中の耳珠のマーカーをタップしてください。');
+    setStatus(`撮影しました。${rollText()}。写真の中の耳珠のマーカーをタップしてください。`);
+    $('rollInfo').textContent = rollText();
   });
 }
 function onTap(ev) {
@@ -266,7 +403,7 @@ function onTap(ev) {
   if (S.target === 'level') {
     if (S.level.length >= 2) S.level = [];
     S.level.push([x, y]);
-    if (S.level.length === 2) { let [p, q] = S.level; if (q[0] < p[0]) [p, q] = [q, p]; S.roll = Math.atan2(q[1] - p[1], q[0] - p[0]) * 180 / Math.PI; setStatus(`水平線を設定しました。傾き補正：${S.roll.toFixed(2)}°`); }
+    if (S.level.length === 2) { let [p, q] = S.level; if (q[0] < p[0]) [p, q] = [q, p]; S.roll = Math.atan2(q[1] - p[1], q[0] - p[0]) * 180 / Math.PI; S.rollSrc = 'manual'; setStatus(`水平線を設定しました。${rollText()}`); $('rollInfo').textContent = rollText(); }
     redrawSnap(); return;
   }
   const px = Math.round(x * S.k), py = Math.round(y * S.k), color = sampleColor(S.snapImg, px, py);
@@ -280,62 +417,89 @@ function onTap(ev) {
   setPhase('frozen'); redrawSnap();
   if (!(S.markers.tragus && S.markers.c7)) setStatus(`${done}を設定しました（色相 ${color.h.toFixed(0)}°、彩度 ${(color.s * 100).toFixed(0)}%）。`);
 }
-function redrawSnap() { S.img = S.snapImg; const ang = angles(); draw(ang); readouts(ang); if (ang.cva !== null) setStatus(`写真でのCVA：${ang.cva.toFixed(1)}°。問題なければ「記録スタート」を押してください。`); }
+function redrawSnap() { S.img = S.snapImg; const ang = angles(); draw(ang); readouts(ang); if (ang.cva !== null) setStatus(`写真でのCVA：${ang.cva.toFixed(1)}°（${rollText()}）。問題なければ「記録スタート」を押してください。`); }
 function selectTarget(t) { S.target = t; document.querySelectorAll('[data-target]').forEach(b => b.classList.toggle('sel', b.dataset.target === t)); hint(); }
-function hint() { $('tapHint').textContent = S.target === 'level' ? '壁の水平なテープなど、本当に水平な線の上を2点タップしてください。' : `${NAMES[S.target]}のマーカーをタップしてください。`; }
+function hint() { $('tapHint').textContent = S.target === 'level' ? '水色の点線（センサーの水平）がずれているときだけ使います。壁の水平なテープなど、本当に水平な線の上を2点タップしてください。' : `${NAMES[S.target]}のマーカーをタップしてください。`; }
 
-function ev(type, extra = {}) { const t = performance.now(); return { type, epoch_ms: +(performance.timeOrigin + t).toFixed(1), perf_ms: +t.toFixed(1), label: S.label, ...extra }; }
-function setLabel(l, log = true) {
-  S.label = l; document.querySelectorAll('[data-label]').forEach(x => x.classList.toggle('sel', x.dataset.label === l));
+function ev(type, extra = {}) { const t = performance.now(); return { type, epoch_ms: +(performance.timeOrigin + t).toFixed(1), perf_ms: +t.toFixed(1), label: S.rowLabel, ...extra }; }
+function setLabel(l, log = true) {   // 手動のラベル
+  S.label = l; if (S.stage === 'manual') S.rowLabel = l;
+  document.querySelectorAll('[data-label]').forEach(x => x.classList.toggle('sel', x.dataset.label === l));
   if (log && S.rec) S.rec.events.push(ev('label', { label: l }));
+}
+function setStage(stage, rowLabel, step = S.step) {   // 自動の案内の区間
+  S.stage = stage; S.rowLabel = rowLabel; S.step = step;
+  if (stage === 'hold') setLabel(PROTOCOL[step], false);
+  if (S.rec) S.rec.events.push(ev('stage', { stage, label: rowLabel, step, target_label: step >= 0 && step < PROTOCOL.length ? PROTOCOL[step] : '' }));
 }
 function startRec() {
   for (const mk of Object.values(S.markers)) { mk.lost = 0; mk.prev = [mk.snapPos[0] * S.k, mk.snapPos[1] * S.k]; }
   setPhase('countdown');
-  const auto = $('protocol').value === 'auto', hold = Math.max(3, +$('holdSec').value || 10) * 1000, sec = +$('recTimer').value;
+  const auto = $('protocol').value === 'auto', hold = Math.max(3, +$('holdSec').value || 10) * 1000, trans = Math.max(0, +$('transSec').value || 0) * 1000, sec = +$('recTimer').value;
   if (sec) say('記録を始めます。写真と同じ位置で、正面を向いてください');
   countdown(sec, () => {
-    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { steps: PROTOCOL, holdMs: hold } : null };
-    setLabel(auto ? '基準' : S.label, false); S.rec.events.push(ev('record_start'));
+    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { steps: PROTOCOL, holdMs: hold, transitionMs: trans, nod: NOD } : null };
+    S.step = -1;
+    if (auto) { S.stage = 'prep'; S.rowLabel = '準備'; } else { S.stage = 'manual'; S.rowLabel = S.label; }
+    S.rec.events.push(ev('record_start'));
+    startVideo();
     setPhase('recording'); $('recStatus').classList.add('on'); $('recStatus').textContent = '記録中…';
-    if (!auto) return;
-    // 自動の案内：うなずき → 各姿勢 → うなずき → 終了
-    const nod = (at, tag) => S.timers.push(setTimeout(() => { say('素早く1回うなずいてください'); beep(1000, 200); if (S.rec) S.rec.events.push(ev('sync_cue', { which: tag })); }, at));
-    nod(0, 'start');
-    PROTOCOL.forEach((l, i) => S.timers.push(setTimeout(() => { setLabel(l); say(SAY[l]); beep(880, 150); }, 3000 + i * hold)));
-    const end = 3000 + PROTOCOL.length * hold;
-    nod(end, 'end');
-    S.timers.push(setTimeout(() => stopRec('自動の案内が終わりました。保存してください。'), end + 3000));
+    if (auto) runProtocol(hold, trans);
   });
 }
+// 自動の案内：準備 → うなずき（検出まで）→［案内中 → 移行中 → 姿勢］×5 → うなずき（検出まで）→ 終了
+async function runProtocol(hold, trans) {
+  const tok = S.rec, alive = () => S.rec === tok;
+  setStage('prep', '準備', -1); await sleep(2000); if (!alive()) return;
+  setStage('nod', 'うなずき', -1); beep(1000, 200); S.rec.events.push(ev('sync_cue', { which: 'start' })); say('素早く1回うなずいてください');
+  await nodOrTimeout('start', NOD.startMax); if (!alive()) return;
+  await sleep(NOD.after); if (!alive()) return;
+  for (let i = 0; i < PROTOCOL.length; i++) {
+    const l = PROTOCOL[i];
+    setStage('guide', '案内中', i); beep(880, 150); await sayWait(SAY[l]); if (!alive()) return;
+    if (trans) { setStage('transition', '移行中', i); await sleep(trans); if (!alive()) return; }
+    setStage('hold', l, i); await sleep(hold); if (!alive()) return;
+  }
+  setStage('nod', 'うなずき', PROTOCOL.length); beep(1000, 200); S.rec.events.push(ev('sync_cue', { which: 'end' })); say('最後に、素早く1回うなずいてください');
+  const ok = await nodOrTimeout('end', NOD.endMax); if (!alive()) return;
+  if (ok) await sleep(NOD.after + 500); if (!alive()) return;
+  stopRec(ok ? '最後のうなずきを検出しました。自動の案内が終わりました。保存してください。' : '最後のうなずきを検出できないまま、待ち時間が終わりました。保存してください。');
+}
 function stopRec(msg) {
-  S.timers.forEach(id => { clearTimeout(id); clearInterval(id); }); S.timers = []; $('countdown').hidden = true;
+  S.timers.forEach(id => { clearTimeout(id); clearInterval(id); }); S.timers = []; $('countdown').hidden = true; S.nodWatch = null;
   if (S.rec) {
     S.rec.events.push(ev('record_stop')); S.rec.stoppedAt = new Date().toISOString(); S.last = S.rec; S.rec = null;
+    stopVideo();
     $('csvBtn').disabled = $('jsonBtn').disabled = false;
-    const v = S.last.rows.filter(r => r.valid).length;
-    $('recStatus').textContent = `${msg || '記録を停止しました。'}（${S.last.rows.length}行、CVAが求まった割合 ${(v / Math.max(1, S.last.rows.length) * 100).toFixed(0)}%）`;
+    const v = S.last.rows.filter(r => r.valid).length, nods = S.last.events.filter(e => e.type === 'nod_detected').length;
+    $('recStatus').textContent = `${msg || '記録を停止しました。'}（${S.last.rows.length}行、CVAが求まった割合 ${(v / Math.max(1, S.last.rows.length) * 100).toFixed(0)}%${S.last.protocol ? `、うなずき検出 ${nods}/2` : ''}）`;
     say('記録を終了しました'); beep(520, 300);
   }
+  S.stage = 'manual'; S.rowLabel = S.label; S.step = -1;
   $('recStatus').classList.remove('on');
   setPhase('live');
 }
 function meta() {
   const st = S.stream ? S.stream.getVideoTracks()[0].getSettings() : {};
   return {
-    app: 'cva-camera', version: VERSION, camera: 'user (front)', createdAt: S.last.startedAt, stoppedAt: S.last.stoppedAt,
+    app: 'cva-camera', version: VERSION, camera: S.cam === 'user' ? 'user (front)' : 'environment (rear)', createdAt: S.last.startedAt, stoppedAt: S.last.stoppedAt,
     timeOrigin: performance.timeOrigin, userAgent: navigator.userAgent,
     video: { width: video.videoWidth, height: video.videoHeight, settings: st, mirrored: false },
     processing: { longSide: S.procLong, minArea: S.minArea }, protocol: S.last.protocol,
-    facing: S.facing > 0 ? 'right' : 'left', rollDeg: S.roll, levelPoints: S.level,
+    facing: S.facing > 0 ? 'right' : 'left',
+    roll: { deg: S.roll, source: S.rollSrc, sensorDeviceRollDeg: S.sensorRoll, gravityAtSnapshot: S.snapGrav, levelPoints: S.level,
+      note: '端末の左右の傾き θ = atan2(-gx, gy)。内カメラの画像では水平線が θ、外カメラでは -θ 傾く' },
+    recordedVideo: S.lastVideo ? { mode: S.lastVideo.mode, mime: S.lastVideo.mime, startEpochMs: S.lastVideo.startEpoch, bytes: S.lastVideo.bytes } : null,
     markers: Object.fromEntries(Object.entries(S.markers).map(([n, m]) => [n, { color: m.color, snapshotPosition: m.snapPos }])),
+    columns: { label: '自動：準備・うなずき・案内中・移行中・各姿勢／手動：押したラベル', target_label: 'その区間で目標にしている姿勢', stage: 'prep | nod | guide | transition | hold | manual', step: '姿勢の番号（0〜4）' },
     units: { epoch_ms: 'Unix時刻[ms] = performance.timeOrigin + perf_ms（posture-lab の meta.timeOrigin + t と同じ基準）', coords: '映像の画素（左上が原点、左右反転なし）', angles: '度' },
     definitions: { cva: 'C7を通る水平線と C7→耳珠 のなす角（画像の傾きを補正）', watanabe: '肩峰→耳珠 と鉛直線のなす角（前傾が正）' },
   };
 }
-function save(name, text, type) {
-  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name;
-  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+function save(name, blobOrText, type) {
+  const blob = blobOrText instanceof Blob ? blobOrText : new Blob([blobOrText], { type });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
 }
 const fileId = () => 'cva-' + S.last.startedAt.replace(/[:.]/g, '-');
 function toCSV(rows) { if (!rows.length) return ''; const k = Object.keys(rows[0]); return '﻿' + [k.join(','), ...rows.map(r => k.map(x => r[x]).join(','))].join('\n'); }
@@ -348,13 +512,17 @@ document.querySelectorAll('[data-target]').forEach(b => b.onclick = () => select
 document.querySelectorAll('[data-label]').forEach(b => b.onclick = () => setLabel(b.dataset.label));
 $('recBtn').onclick = () => (S.phase === 'recording' || S.phase === 'countdown') ? stopRec() : startRec();
 $('syncBtn').onclick = () => { if (S.rec) { S.rec.events.push(ev('sync')); setStatus('同期の合図を記録しました。'); } };
-$('protocol').onchange = e => { $('protocolNote').textContent = e.target.value === 'auto' ? '自動：うなずき → 基準 → うつむく → 顎を突き出す → 目線だけ下げる → 基準 → うなずき の順に、音声で案内して自動で終わります。' : '手動：姿勢を変えるたびにラベルを押してください。記録停止も手動です。'; };
+$('protocol').onchange = e => { $('protocolNote').textContent = e.target.value === 'auto' ? '自動：うなずき → ［案内中 → 移行中 → 姿勢］× 5 → うなずき。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。' : '手動：姿勢を変えるたびにラベルを押してください。記録停止も手動です。'; };
+$('camSel').onchange = () => { if (S.running) { stopCamera(); start(); } };
 $('csvBtn').onclick = () => save(fileId() + '.csv', toCSV(S.last.rows), 'text/csv');
 $('jsonBtn').onclick = () => save(fileId() + '.json', JSON.stringify({ meta: meta(), events: S.last.events, rows: S.last.rows }), 'application/json');
+$('videoBtn').onclick = () => { if (S.lastVideo) save(fileId() + '.' + S.lastVideo.ext, S.lastVideo.blob); };
 $('maskBtn').onclick = () => { S.showMask = !S.showMask; $('maskBtn').textContent = S.showMask ? '検出範囲の表示を消す' : '色の検出範囲を表示'; if (S.phase === 'frozen') redrawSnap(); };
-$('resetBtn').onclick = () => { S.markers = {}; S.level = []; S.roll = 0; selectTarget('tragus'); if (S.phase === 'frozen') { setPhase('frozen'); redrawSnap(); } };
+$('resetBtn').onclick = () => { S.markers = {}; S.level = []; applySensorRoll(); $('rollInfo').textContent = rollText(); selectTarget('tragus'); if (S.phase === 'frozen') { setPhase('frozen'); redrawSnap(); } };
+$('levelResetBtn').onclick = () => { S.level = []; applySensorRoll(); $('rollInfo').textContent = rollText(); if (S.phase === 'frozen') redrawSnap(); };
 const bind = (id, key) => { $(id).oninput = e => { S[key] = +e.target.value; $(id + 'V').textContent = e.target.value; if (key === 'hTol') Object.values(S.markers).forEach(m => m.color.hTol = S.hTol); }; };
 bind('hTol', 'hTol'); bind('minArea', 'minArea'); bind('proc', 'procLong');
 addEventListener('resize', () => { layout(); if (S.phase === 'frozen') redrawSnap(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && (S.phase === 'recording' || S.phase === 'countdown')) stopRec('画面が非表示になったため記録を停止しました。保存してください。'); });
 window.__cva = S;   // 動作確認用
+window.__cvaGrav = onGrav;

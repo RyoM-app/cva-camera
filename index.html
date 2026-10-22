@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>CVAカメラ — 1人で側面からCVAを測る</title>
-<link rel="stylesheet" href="styles.css?v=0.2.0">
+<link rel="stylesheet" href="styles.css?v=0.3.0">
 </head>
 <body>
 <main>
 <header>
-  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.2.0</div><h1>CVAカメラ</h1></div>
+  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.3.0</div><h1>CVAカメラ</h1></div>
   <span class="badge">実験用・未検証</span>
 </header>
-<p class="intro">体の横に置いたスマホの内カメラで、耳珠・C7・肩峰の色マーカーを追跡し、CVAと渡邉角を記録します。1人で使えるように、撮影と記録開始にセルフタイマーと音声の案内があります。映像は保存・送信しません。</p>
+<p class="intro">体の横に置いたスマホのカメラで、耳珠・C7・肩峰の色マーカーを追跡し、CVAと渡邉角を記録します。1人で使えるように、撮影と記録開始にセルフタイマーと音声の案内があります。カメラの傾きは重力センサーで自動補正します。映像は、選んだときだけ端末に保存し、どこにも送信しません。</p>
 
 <div class="layout">
   <section class="card camera-card">
@@ -33,10 +33,11 @@
 
   <div>
     <section class="card">
-      <h2>1<span>内カメラを開始</span></h2>
-      <p>スマホを体の真横（体の側面に直交）に、画面を自分に向けて立てます。高さは肩（C7）に合わせ、1〜2 m離します。</p>
+      <h2>1<span>カメラを開始</span></h2>
+      <p>スマホを体の真横（体の側面に直交）に<b>縦向きで立てて</b>置きます。高さは肩（C7）に合わせ、1〜2 m離します。内カメラなら画面を自分に向けます。外カメラは、別の人が撮るときや、画質を上げたいときに使います。</p>
+      <div class="input-row"><label>カメラ<select id="camSel"><option value="user" selected>内カメラ（1人で使う）</option><option value="environment">外カメラ</option></select></label></div>
       <div class="actions">
-        <button class="primary" id="startBtn">内カメラを開始</button>
+        <button class="primary" id="startBtn">カメラを開始</button>
         <button id="stopBtn" disabled>カメラを停止</button>
       </div>
       <p id="status" role="status">待機中です。HTTPSで開いてください。</p>
@@ -44,7 +45,7 @@
 
     <section class="card">
       <h2>2<span>写真を撮って、マーカーを指定</span></h2>
-      <p>セルフタイマーで1枚撮ります。撮影の合図の音が鳴るまで、正面を向いて楽な姿勢でいてください。</p>
+      <p>セルフタイマーで1枚撮ります。撮影の合図の音が鳴るまで、正面を向いて楽な姿勢でいてください。カメラの傾きは、撮影の直前1秒間の重力センサーの値から自動で補正します（水色の点線がセンサーの水平）。</p>
       <div class="input-row">
         <label>セルフタイマー<select id="snapTimer"><option value="0">すぐ</option><option value="3">3秒</option><option value="5" selected>5秒</option><option value="10">10秒</option></select></label>
         <button class="primary" id="snapBtn" disabled>写真を撮る</button>
@@ -56,9 +57,10 @@
           <button data-target="tragus" class="sel">耳珠</button>
           <button data-target="c7">C7</button>
           <button data-target="acromion">肩峰（任意）</button>
-          <button data-target="level">水平線（任意）</button>
+          <button data-target="level">水平線（手動・任意）</button>
         </div>
         <p class="note" id="tapHint">耳珠のマーカーをタップしてください。</p>
+        <p class="note"><b id="rollInfo">傾き補正：—</b> <button id="levelResetBtn" class="small">センサーの補正に戻す</button></p>
       </div>
       <details>
         <summary>検出の調整</summary>
@@ -75,8 +77,11 @@
         <label>開始までの待ち時間<select id="recTimer"><option value="0">すぐ</option><option value="3">3秒</option><option value="5" selected>5秒</option><option value="10">10秒</option></select></label>
         <label>進め方<select id="protocol"><option value="auto" selected>音声で姿勢を案内（自動）</option><option value="manual">手動でラベルを押す</option></select></label>
         <label>1姿勢の時間（秒）<input type="number" id="holdSec" min="3" max="60" value="10"></label>
+        <label>移行の時間（秒）<input type="number" id="transSec" min="0" max="15" value="3"></label>
+        <label>映像の保存<select id="vidMode"><option value="none" selected>しない（データのみ）</option><option value="overlay">計測結果を重ねた映像（発表用）</option><option value="raw">元の映像</option></select></label>
       </div>
-      <p class="note" id="protocolNote">自動：うなずき → 基準 → うつむく → 顎を突き出す → 目線だけ下げる → 基準 → うなずき の順に、音声で案内して自動で終わります。</p>
+      <p class="note" id="protocolNote">自動：うなずき → ［案内中 → 移行中 → 姿勢］× 5 → うなずき。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。</p>
+      <p class="note">記録の <code>label</code> 列には、音声の案内中は「案内中」、案内のあと姿勢を変えている間は「移行中」と入ります。目標の姿勢は <code>target_label</code> 列に入ります。映像には顔が写ります。映像は端末に保存するだけで、どこにも送りません。</p>
       <div class="actions">
         <button class="primary" id="recBtn" disabled>記録スタート</button>
         <button id="syncBtn" disabled>同期の合図</button>
@@ -96,13 +101,14 @@
       <div class="actions">
         <button id="csvBtn" disabled>CSVを保存</button>
         <button id="jsonBtn" disabled>全記録JSONを保存</button>
+        <button id="videoBtn" disabled>映像を保存</button>
       </div>
       <p class="note">CSV：時刻（posture-labと同じUnix時刻[ms]）、各マーカーの座標、CVA、渡邉角、姿勢のラベル。JSON：CSVの内容に加え、色の設定・解像度・案内と同期のイベント。</p>
     </section>
   </div>
 </div>
-<footer>CVAカメラ 0.2.0 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
+<footer>CVAカメラ 0.3.0 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
 </main>
-<script src="app.js?v=0.2.0"></script>
+<script src="app.js?v=0.3.0"></script>
 </body>
 </html>
