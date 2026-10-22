@@ -24,3 +24,5 @@ details input[type=range]{width:100%;max-width:460px;padding:0;min-height:30px}
 .input-row select{width:auto;min-width:140px}
 .chips span.warn{background:#fde7c8;color:#8a4b00}
 button.small{padding:4px 10px;font-size:.85em;margin-left:6px}
+.warn-box{background:#fff1e0;color:#8a4b00;border-left:3px solid #e08a1e;padding:8px 10px;border-radius:6px}
+.warn-box[hidden]{display:none}

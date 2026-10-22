@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>CVAカメラ — 1人で側面からCVAを測る</title>
-<link rel="stylesheet" href="styles.css?v=0.3.0">
+<link rel="stylesheet" href="styles.css?v=0.4.0">
 </head>
 <body>
 <main>
 <header>
-  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.3.0</div><h1>CVAカメラ</h1></div>
+  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.4.0</div><h1>CVAカメラ</h1></div>
   <span class="badge">実験用・未検証</span>
 </header>
 <p class="intro">体の横に置いたスマホのカメラで、耳珠・C7・肩峰の色マーカーを追跡し、CVAと渡邉角を記録します。1人で使えるように、撮影と記録開始にセルフタイマーと音声の案内があります。カメラの傾きは重力センサーで自動補正します。映像は、選んだときだけ端末に保存し、どこにも送信しません。</p>
@@ -60,6 +60,7 @@
           <button data-target="level">水平線（手動・任意）</button>
         </div>
         <p class="note" id="tapHint">耳珠のマーカーをタップしてください。</p>
+        <p class="note warn-box" id="clashInfo" hidden></p>
         <p class="note"><b id="rollInfo">傾き補正：—</b> <button id="levelResetBtn" class="small">センサーの補正に戻す</button></p>
       </div>
       <details>
@@ -76,11 +77,12 @@
       <div class="input-row">
         <label>開始までの待ち時間<select id="recTimer"><option value="0">すぐ</option><option value="3">3秒</option><option value="5" selected>5秒</option><option value="10">10秒</option></select></label>
         <label>進め方<select id="protocol"><option value="auto" selected>音声で姿勢を案内（自動）</option><option value="manual">手動でラベルを押す</option></select></label>
+        <label>案内の内容<select id="preset"><option value="basic" selected>CVAカメラだけ（7区間）</option><option value="dual">posture-labと同時（スマホを手に持つ、9区間）</option></select></label>
         <label>1姿勢の時間（秒）<input type="number" id="holdSec" min="3" max="60" value="10"></label>
         <label>移行の時間（秒）<input type="number" id="transSec" min="0" max="15" value="3"></label>
         <label>映像の保存<select id="vidMode"><option value="none" selected>しない（データのみ）</option><option value="overlay">計測結果を重ねた映像（発表用）</option><option value="raw">元の映像</option></select></label>
       </div>
-      <p class="note" id="protocolNote">自動：うなずき → ［案内中 → 移行中 → 姿勢］× 5 → うなずき。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。</p>
+      <p class="note" id="protocolNote">自動：うなずき → 基準 → うつむく → 基準 → 顎を突き出す → 基準 → 目線だけ下げる → 基準 → うなずき。姿勢の間には必ず基準（頭を楽な位置に戻す）が入ります。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。</p>
       <p class="note">記録の <code>label</code> 列には、音声の案内中は「案内中」、案内のあと姿勢を変えている間は「移行中」と入ります。目標の姿勢は <code>target_label</code> 列に入ります。映像には顔が写ります。映像は端末に保存するだけで、どこにも送りません。</p>
       <div class="actions">
         <button class="primary" id="recBtn" disabled>記録スタート</button>
@@ -91,6 +93,7 @@
         <button data-label="うつむく">うつむく</button>
         <button data-label="顎を突き出す">顎を突き出す</button>
         <button data-label="目線だけ下げる">目線だけ下げる</button>
+        <button data-label="端末だけ動かす">端末だけ動かす</button>
         <button data-label="自由">自由</button>
       </div>
       <p id="recStatus">未記録</p>
@@ -107,8 +110,8 @@
     </section>
   </div>
 </div>
-<footer>CVAカメラ 0.3.0 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
+<footer>CVAカメラ 0.4.0 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
 </main>
-<script src="app.js?v=0.3.0"></script>
+<script src="app.js?v=0.4.0"></script>
 </body>
 </html>

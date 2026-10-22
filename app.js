@@ -2,16 +2,32 @@
 // CVAカメラ 0.3.0 — 1人で使える側面CVA計測
 // 流れ：カメラを開始 → セルフタイマーで1枚撮影 → 写真の上でマーカーをタップ → 記録スタート（ライブ映像で追跡）
 // 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
+// 0.4.0：姿勢の間に基準を挟む、posture-labとの同時計測用の案内、色の判定を厳しく（マーカー自身の色の幅から決める）、大きさの急変を除外、色の重なりの警告
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const $ = id => document.getElementById(id);
 const video = $('video'), snap = $('snap'), overlay = $('overlay'), octx = overlay.getContext('2d');
 const proc = document.createElement('canvas'), pctx = proc.getContext('2d', { willReadFrequently: true });
 const comp = document.createElement('canvas'), cctx = comp.getContext('2d');   // 映像の保存用（計測結果を重ねる）
 const NAMES = { tragus: '耳珠', c7: 'C7', acromion: '肩峰' };
-const RING = { tragus: '#e04a3f', c7: '#e9a23b', acromion: '#2f6f8f' };
-const PROTOCOL = ['基準', 'うつむく', '顎を突き出す', '目線だけ下げる', '基準'];
-const SAY = { '基準': '楽な姿勢で、正面を見てください', 'うつむく': 'スマホを見るように、うつむいてください', '顎を突き出す': '顎を前に突き出してください', '目線だけ下げる': '頭は動かさず、目線だけを下げてください' };
+// 案内の手順。姿勢と姿勢の間には必ず「基準」（頭を楽な位置に戻す）を挟む
+const BACK = '頭を楽な位置に戻して、正面を見てください';
+const PRESETS = {
+  basic: [
+    ['基準', '楽な姿勢で、正面を見てください'],
+    ['うつむく', 'スマホを見るように、うつむいてください'], ['基準', BACK],
+    ['顎を突き出す', '顎を前に突き出してください'], ['基準', BACK],
+    ['目線だけ下げる', '頭は楽な位置のまま、目線だけを下げてください'], ['基準', BACK],
+  ],
+  dual: [   // posture-labのスマホを手に持って同時に計測するとき
+    ['基準', 'スマホを目の高さに持ち、頭を楽な位置にして、画面を見てください'],
+    ['うつむく', 'スマホを胸の高さに下げて、うつむいて画面を見てください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
+    ['顎を突き出す', 'スマホを胸の高さに下げて、顎を前に突き出して画面を見てください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
+    ['目線だけ下げる', 'スマホを胸の高さに下げて、頭は動かさず、目線だけで画面を見てください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
+    ['端末だけ動かす', '頭は動かさず、スマホだけをゆっくり上下に動かしてください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
+  ],
+};
+let PROTOCOL = PRESETS.basic.map(x => x[0]), SAYS = PRESETS.basic.map(x => x[1]);
 const NOD = { drop: 6, back: 3, startMax: 8000, endMax: 12000, after: 1500 };   // うなずき：基準から6°以上下がり、3°以内に戻ったら検出
 
 const S = {
@@ -123,8 +139,49 @@ function sampleColor(img, px, py) {
   return { h, s, v, hTol: S.hTol, sMin: Math.max(0.3, s - 0.28), vMin: Math.max(0.2, v - 0.3) };  // Python版と同じ幅
 }
 
+// マーカー自身の画素から色の幅を決める（肌や背景を拾いにくくする）
+function hsvStats(img, c, cx, cy, r, keepTop = 1) {   // (cx,cy)から半径rで色cに合う画素の色の統計。keepTop：彩度の高い順に使う割合
+  const { width: W, height: H, data } = img, px = [];
+  for (let y = Math.max(0, Math.floor(cy - r)); y <= Math.min(H - 1, Math.ceil(cy + r)); y++)
+    for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(W - 1, Math.ceil(cx + r)); x++) {
+      if (Math.hypot(x - cx, y - cy) > r) continue;
+      const i = (y * W + x) * 4; if (c && !matches(data, i, c)) continue;
+      px.push(rgb2hsv(data[i], data[i + 1], data[i + 2]));
+    }
+  px.sort((a, b) => b[1] - a[1]); const use = px.slice(0, Math.max(1, Math.ceil(px.length * keepTop)));
+  if (use.length < 5) return null;
+  const hs = use.map(p => p[0]), ss = use.map(p => p[1]), vs = use.map(p => p[2]);
+  const sx = hs.reduce((a, h) => a + Math.cos(h * Math.PI / 180), 0), sy = hs.reduce((a, h) => a + Math.sin(h * Math.PI / 180), 0);
+  let h = Math.atan2(sy, sx) * 180 / Math.PI; if (h < 0) h += 360;
+  const pct = (a, q) => { const t = [...a].sort((p, q2) => p - q2); return t[Math.min(t.length - 1, Math.floor(q * t.length))]; };
+  const dev = hs.map(x => { const d = Math.abs(x - h); return Math.min(d, 360 - d); });
+  const hAuto = Math.max(8, Math.min(30, 1.5 * pct(dev, 0.9) + 4));
+  return { h, s: pct(ss, 0.5), v: pct(vs, 0.5), hAuto, hTol: Math.min(S.hTol, hAuto), sMin: Math.max(0.35, pct(ss, 0.1) - 0.08), vMin: Math.max(0.2, pct(vs, 0.1) - 0.15) };
+}
+// マーカー自身の画素から色の幅を決める（肌や背景を拾いにくくする）
+// ① タップ位置の近く（半径5画素）で、彩度の高い半分だけを使って色を決める（マーカーは肌より鮮やか）
+// ② その色で塊を探し、塊の内側の画素で色を決め直す
+function markerColor(img, px, py) {
+  const c0 = sampleColor(img, px, py);
+  let c1 = hsvStats(img, c0, px, py, 5, 0.5) || { ...c0, hAuto: c0.hTol };
+  let b = findBlob(img, c1, px, py, 40, 1); if (!b) { b = findBlob(img, c0, px, py, 40, 1); if (!b) return null; c1 = { ...c0, hAuto: c0.hTol }; }
+  const c2 = hsvStats(img, c1, b.x, b.y, Math.max(2, 0.8 * Math.sqrt(b.area / Math.PI)), 1);
+  const color = c2 || c1;
+  const b2 = findBlob(img, color, b.x, b.y, 40, 1) || b;
+  return { color, blob: b2 };
+}
+// 同じ色が、マーカー以外（肌・服・背景）にどれだけあるか。マーカーの面積に対する比
+function colorClash(img, color, blob) {
+  const { width: W, height: H, data } = img, r = 2.5 * Math.sqrt(blob.area / Math.PI) + 3; let n = 0;
+  for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x += 2) {
+    if (Math.hypot(x - blob.x, y - blob.y) < r) continue;
+    if (matches(data, (y * W + x) * 4, color)) n += 4;
+  }
+  return n / blob.area;
+}
+
 // ---------------------------------------------------------------- 検出
-function findBlob(img, c, cx, cy, R, step = 1) {
+function findBlob(img, c, cx, cy, R, step = 1, aRef = 0) {   // aRef：期待する大きさ。0.3〜3倍の外は除外し、近い大きさを優先
   const { width: W, height: H, data } = img;
   const x0 = Math.max(0, Math.floor(cx - R)), x1 = Math.min(W - 1, Math.ceil(cx + R));
   const y0 = Math.max(0, Math.floor(cy - R)), y1 = Math.min(H - 1, Math.ceil(cy + R));
@@ -143,18 +200,24 @@ function findBlob(img, c, cx, cy, R, step = 1) {
       if (uj < wh - 1 && m[u + ww] && !lab[u + ww]) { lab[u + ww] = n; q[tail++] = u + ww; }
     }
     const area = a * step * step; if (area < S.minArea) continue;
+    if (aRef && (area < 0.3 * aRef || area > 3 * aRef)) continue;
     const bx = x0 + (sx / a) * step, by = y0 + (sy / a) * step, d = Math.hypot(bx - cx, by - cy);
-    const score = step === 1 ? -d + 0.02 * area : area;
+    const size = aRef ? -8 * Math.abs(Math.log(area / aRef)) : 0.02 * area;
+    const score = step === 1 ? -d + size : (aRef ? size : area);
     if (score > bestScore) { bestScore = score; best = { x: bx, y: by, area }; }
   }
   return best;
 }
 function track() {
   for (const mk of Object.values(S.markers)) {
-    let b = findBlob(S.img, mk.color, mk.prev[0], mk.prev[1], Math.max(25, mk.rad * 4), 1);
-    if (!b && mk.lost >= 3) b = findBlob(S.img, mk.color, S.img.width / 2, S.img.height / 2, Math.max(S.img.width, S.img.height), 2);
-    if (b) { mk.prev = [b.x, b.y]; mk.rad = 0.7 * mk.rad + 0.3 * Math.sqrt(b.area / Math.PI); mk.lost = 0; mk.pos = [b.x / S.k, b.y / S.k]; mk.area = b.area / (S.k * S.k); }
-    else { mk.lost++; mk.pos = null; mk.area = null; }
+    const aRef = mk.aRef * S.k * S.k;   // 期待する大きさ（処理画素）
+    let b = findBlob(S.img, mk.color, mk.prev[0], mk.prev[1], Math.max(25, mk.rad * 4), 1, aRef);
+    if (!b && mk.lost >= 3) b = findBlob(S.img, mk.color, mk.prev[0], mk.prev[1], Math.max(S.img.width, S.img.height), 2, aRef);
+    if (b) {
+      mk.prev = [b.x, b.y]; mk.rad = 0.7 * mk.rad + 0.3 * Math.sqrt(b.area / Math.PI); mk.lost = 0; mk.pos = [b.x / S.k, b.y / S.k]; mk.area = b.area / (S.k * S.k);
+      mk.aRef = 0.95 * mk.aRef + 0.05 * mk.area; mk.found++;
+    } else { mk.lost++; mk.pos = null; mk.area = null; }
+    mk.frames++;
   }
 }
 
@@ -200,15 +263,17 @@ function draw(ang) {
   if (T && C && ang.cva !== null) {
     const r = Math.hypot(T[0] - C[0], T[1] - C[1]), a0 = (S.facing > 0 ? S.roll : 180 + S.roll) * Math.PI / 180;
     const a1 = a0 + (S.facing > 0 ? -1 : 1) * ang.cva * Math.PI / 180;
-    octx.fillStyle = 'rgba(240,120,40,.35)'; octx.beginPath(); octx.moveTo(C[0], C[1]); octx.arc(C[0], C[1], r, Math.min(a0, a1), Math.max(a0, a1)); octx.closePath(); octx.fill();
-    octx.strokeStyle = '#e0352b'; octx.lineWidth = lw;
-    octx.beginPath(); octx.moveTo(C[0], C[1]); octx.lineTo(C[0] + 1.3 * r * Math.cos(a0), C[1] + 1.3 * r * Math.sin(a0)); octx.stroke();
-    octx.beginPath(); octx.moveTo(C[0], C[1]); octx.lineTo(T[0], T[1]); octx.stroke();
+    // 扇形と線も白と黒（マーカーの色と混ざらないように）
+    octx.fillStyle = 'rgba(255,255,255,.35)'; octx.beginPath(); octx.moveTo(C[0], C[1]); octx.arc(C[0], C[1], r, Math.min(a0, a1), Math.max(a0, a1)); octx.closePath(); octx.fill();
+    const seg = (x1, y1, x2, y2) => { for (const [w, c] of [[3.5 * lw, 'rgba(0,0,0,.7)'], [1.6 * lw, '#fff']]) { octx.strokeStyle = c; octx.lineWidth = w; octx.beginPath(); octx.moveTo(x1, y1); octx.lineTo(x2, y2); octx.stroke(); } };
+    seg(C[0], C[1], C[0] + 1.3 * r * Math.cos(a0), C[1] + 1.3 * r * Math.sin(a0)); seg(C[0], C[1], T[0], T[1]);
   }
-  for (const [n, mk] of Object.entries(S.markers)) {
-    const p = mk.pos || [mk.prev[0] / S.k, mk.prev[1] / S.k];
-    octx.strokeStyle = mk.pos ? RING[n] : '#999'; octx.lineWidth = 2.5 * lw;
-    octx.beginPath(); octx.arc(p[0], p[1], Math.max(8 / v.s, mk.rad / S.k * 1.3), 0, Math.PI * 2); octx.stroke();
+  for (const [n, mk] of Object.entries(S.markers)) {   // 円は白と黒で描く（保存した映像を後で解析しても、マーカーの色と混ざらない）
+    const p = mk.pos || [mk.prev[0] / S.k, mk.prev[1] / S.k], rr = Math.max(8 / v.s, mk.rad / S.k * 1.3);
+    octx.lineWidth = 4 * lw; octx.strokeStyle = 'rgba(0,0,0,.75)'; octx.beginPath(); octx.arc(p[0], p[1], rr, 0, Math.PI * 2); octx.stroke();
+    octx.lineWidth = 2 * lw; octx.strokeStyle = mk.pos ? '#ffffff' : '#888888'; octx.setLineDash(mk.pos ? [] : [6 / v.s, 5 / v.s]); octx.beginPath(); octx.arc(p[0], p[1], rr, 0, Math.PI * 2); octx.stroke(); octx.setLineDash([]);
+    const fs = 12 / v.s; octx.font = `700 ${fs}px system-ui, sans-serif`; const tw = octx.measureText(NAMES[n]).width, tx = p[0] + rr + 3 / v.s, ty = p[1] - rr;
+    octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fillRect(tx - 2 / v.s, ty - fs, tw + 4 / v.s, fs * 1.3); octx.fillStyle = '#fff'; octx.fillText(NAMES[n], tx, ty);
   }
   if (S.level.length) {
     octx.fillStyle = '#ffd34d'; S.level.forEach(p => { octx.beginPath(); octx.arc(p[0], p[1], 6 / v.s, 0, Math.PI * 2); octx.fill(); });
@@ -406,16 +471,23 @@ function onTap(ev) {
     if (S.level.length === 2) { let [p, q] = S.level; if (q[0] < p[0]) [p, q] = [q, p]; S.roll = Math.atan2(q[1] - p[1], q[0] - p[0]) * 180 / Math.PI; S.rollSrc = 'manual'; setStatus(`水平線を設定しました。${rollText()}`); $('rollInfo').textContent = rollText(); }
     redrawSnap(); return;
   }
-  const px = Math.round(x * S.k), py = Math.round(y * S.k), color = sampleColor(S.snapImg, px, py);
-  const b = findBlob(S.snapImg, color, px, py, 40, 1);              // 写真の上で実際に検出できるか確かめる
-  if (!b) { setStatus(`${NAMES[S.target]}の色を検出できません。マーカーの中心をタップし直してください。`, true); return; }
-  S.markers[S.target] = { color, prev: [b.x, b.y], rad: Math.sqrt(b.area / Math.PI), lost: 0, pos: [b.x / S.k, b.y / S.k], area: b.area / (S.k * S.k), snapPos: [b.x / S.k, b.y / S.k] };
+  const px = Math.round(x * S.k), py = Math.round(y * S.k), mc = markerColor(S.snapImg, px, py);   // 写真の上で実際に検出できるか確かめる
+  if (!mc) { setStatus(`${NAMES[S.target]}の色を検出できません。マーカーの中心をタップし直してください。`, true); return; }
+  const { color, blob: b } = mc, clash = colorClash(S.snapImg, color, b);
+  S.markers[S.target] = { color, clash, prev: [b.x, b.y], rad: Math.sqrt(b.area / Math.PI), lost: 0, found: 0, frames: 0, pos: [b.x / S.k, b.y / S.k], area: b.area / (S.k * S.k), aRef: b.area / (S.k * S.k), snapArea: b.area / (S.k * S.k), snapPos: [b.x / S.k, b.y / S.k] };
+  updateClash();
   if (S.markers.tragus && S.markers.c7) S.facing = S.markers.tragus.prev[0] > S.markers.c7.prev[0] ? 1 : -1;
   const done = NAMES[S.target];
   const order = ['tragus', 'c7', 'acromion'], i = order.indexOf(S.target);
   if (i >= 0 && i < 2) selectTarget(order[i + 1]); else hint();
   setPhase('frozen'); redrawSnap();
-  if (!(S.markers.tragus && S.markers.c7)) setStatus(`${done}を設定しました（色相 ${color.h.toFixed(0)}°、彩度 ${(color.s * 100).toFixed(0)}%）。`);
+  if (!(S.markers.tragus && S.markers.c7)) setStatus(`${done}を設定しました（色相 ${color.h.toFixed(0)}°、彩度 ${(color.s * 100).toFixed(0)}%）。`, clash > 0.3);
+}
+// 色の重なりの警告：マーカーと同じ色が、ほかの場所にマーカーの30%以上あれば知らせる
+function updateClash() {
+  const bad = Object.entries(S.markers).filter(([, m]) => m.clash > 0.3);
+  $('clashInfo').hidden = !bad.length;
+  $('clashInfo').textContent = bad.length ? `注意：${bad.map(([n, m]) => `${NAMES[n]}の色が、肌・服・背景にもあります（マーカーの${Math.round(m.clash * 100)}%）`).join('、')}。追跡が外れやすいので、別の色のマーカーに替えるか、色相の許容幅を狭めてください。紫の範囲で確認できます。` : '';
 }
 function redrawSnap() { S.img = S.snapImg; const ang = angles(); draw(ang); readouts(ang); if (ang.cva !== null) setStatus(`写真でのCVA：${ang.cva.toFixed(1)}°（${rollText()}）。問題なければ「記録スタート」を押してください。`); }
 function selectTarget(t) { S.target = t; document.querySelectorAll('[data-target]').forEach(b => b.classList.toggle('sel', b.dataset.target === t)); hint(); }
@@ -433,12 +505,13 @@ function setStage(stage, rowLabel, step = S.step) {   // 自動の案内の区�
   if (S.rec) S.rec.events.push(ev('stage', { stage, label: rowLabel, step, target_label: step >= 0 && step < PROTOCOL.length ? PROTOCOL[step] : '' }));
 }
 function startRec() {
-  for (const mk of Object.values(S.markers)) { mk.lost = 0; mk.prev = [mk.snapPos[0] * S.k, mk.snapPos[1] * S.k]; }
+  for (const mk of Object.values(S.markers)) { mk.lost = 0; mk.found = 0; mk.frames = 0; mk.aRef = mk.snapArea; mk.prev = [mk.snapPos[0] * S.k, mk.snapPos[1] * S.k]; }
   setPhase('countdown');
   const auto = $('protocol').value === 'auto', hold = Math.max(3, +$('holdSec').value || 10) * 1000, trans = Math.max(0, +$('transSec').value || 0) * 1000, sec = +$('recTimer').value;
   if (sec) say('記録を始めます。写真と同じ位置で、正面を向いてください');
   countdown(sec, () => {
-    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { steps: PROTOCOL, holdMs: hold, transitionMs: trans, nod: NOD } : null };
+    const preset = $('preset').value; PROTOCOL = PRESETS[preset].map(x => x[0]); SAYS = PRESETS[preset].map(x => x[1]);
+    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, holdMs: hold, transitionMs: trans, nod: NOD } : null };
     S.step = -1;
     if (auto) { S.stage = 'prep'; S.rowLabel = '準備'; } else { S.stage = 'manual'; S.rowLabel = S.label; }
     S.rec.events.push(ev('record_start'));
@@ -456,7 +529,7 @@ async function runProtocol(hold, trans) {
   await sleep(NOD.after); if (!alive()) return;
   for (let i = 0; i < PROTOCOL.length; i++) {
     const l = PROTOCOL[i];
-    setStage('guide', '案内中', i); beep(880, 150); await sayWait(SAY[l]); if (!alive()) return;
+    setStage('guide', '案内中', i); beep(880, 150); await sayWait(SAYS[i]); if (!alive()) return;
     if (trans) { setStage('transition', '移行中', i); await sleep(trans); if (!alive()) return; }
     setStage('hold', l, i); await sleep(hold); if (!alive()) return;
   }
@@ -472,7 +545,9 @@ function stopRec(msg) {
     stopVideo();
     $('csvBtn').disabled = $('jsonBtn').disabled = false;
     const v = S.last.rows.filter(r => r.valid).length, nods = S.last.events.filter(e => e.type === 'nod_detected').length;
-    $('recStatus').textContent = `${msg || '記録を停止しました。'}（${S.last.rows.length}行、CVAが求まった割合 ${(v / Math.max(1, S.last.rows.length) * 100).toFixed(0)}%${S.last.protocol ? `、うなずき検出 ${nods}/2` : ''}）`;
+    S.last.detection = Object.fromEntries(Object.entries(S.markers).map(([n, m]) => [n, { found: m.found, frames: m.frames, rate: m.frames ? +(m.found / m.frames).toFixed(3) : null, colorClash: +m.clash.toFixed(3) }]));
+    const det = Object.entries(S.last.detection).map(([n, d]) => `${NAMES[n]} ${Math.round(100 * (d.rate ?? 0))}%`).join('・');
+    $('recStatus').textContent = `${msg || '記録を停止しました。'}（${S.last.rows.length}行、CVAが求まった割合 ${(v / Math.max(1, S.last.rows.length) * 100).toFixed(0)}%、検出：${det}${S.last.protocol ? `、うなずき検出 ${nods}/2` : ''}）`;
     say('記録を終了しました'); beep(520, 300);
   }
   S.stage = 'manual'; S.rowLabel = S.label; S.step = -1;
@@ -490,8 +565,9 @@ function meta() {
     roll: { deg: S.roll, source: S.rollSrc, sensorDeviceRollDeg: S.sensorRoll, gravityAtSnapshot: S.snapGrav, levelPoints: S.level,
       note: '端末の左右の傾き θ = atan2(-gx, gy)。内カメラの画像では水平線が θ、外カメラでは -θ 傾く' },
     recordedVideo: S.lastVideo ? { mode: S.lastVideo.mode, mime: S.lastVideo.mime, startEpochMs: S.lastVideo.startEpoch, bytes: S.lastVideo.bytes } : null,
-    markers: Object.fromEntries(Object.entries(S.markers).map(([n, m]) => [n, { color: m.color, snapshotPosition: m.snapPos }])),
-    columns: { label: '自動：準備・うなずき・案内中・移行中・各姿勢／手動：押したラベル', target_label: 'その区間で目標にしている姿勢', stage: 'prep | nod | guide | transition | hold | manual', step: '姿勢の番号（0〜4）' },
+    markers: Object.fromEntries(Object.entries(S.markers).map(([n, m]) => [n, { color: m.color, snapshotPosition: m.snapPos, snapshotArea: m.snapArea, colorClash: m.clash }])),
+    detection: S.last.detection,
+    columns: { label: '自動：準備・うなずき・案内中・移行中・各姿勢／手動：押したラベル', target_label: 'その区間で目標にしている姿勢', stage: 'prep | nod | guide | transition | hold | manual', step: '姿勢の番号（0から。基準は何度も出てくるので step で区別する）' },
     units: { epoch_ms: 'Unix時刻[ms] = performance.timeOrigin + perf_ms（posture-lab の meta.timeOrigin + t と同じ基準）', coords: '映像の画素（左上が原点、左右反転なし）', angles: '度' },
     definitions: { cva: 'C7を通る水平線と C7→耳珠 のなす角（画像の傾きを補正）', watanabe: '肩峰→耳珠 と鉛直線のなす角（前傾が正）' },
   };
@@ -512,15 +588,20 @@ document.querySelectorAll('[data-target]').forEach(b => b.onclick = () => select
 document.querySelectorAll('[data-label]').forEach(b => b.onclick = () => setLabel(b.dataset.label));
 $('recBtn').onclick = () => (S.phase === 'recording' || S.phase === 'countdown') ? stopRec() : startRec();
 $('syncBtn').onclick = () => { if (S.rec) { S.rec.events.push(ev('sync')); setStatus('同期の合図を記録しました。'); } };
-$('protocol').onchange = e => { $('protocolNote').textContent = e.target.value === 'auto' ? '自動：うなずき → ［案内中 → 移行中 → 姿勢］× 5 → うなずき。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。' : '手動：姿勢を変えるたびにラベルを押してください。記録停止も手動です。'; };
+function protocolNote() {
+  if ($('protocol').value !== 'auto') { $('protocolNote').textContent = '手動：姿勢を変えるたびにラベルを押してください。記録停止も手動です。'; return; }
+  const steps = PRESETS[$('preset').value].map(x => x[0]);
+  $('protocolNote').textContent = `自動：うなずき → ${steps.join(' → ')} → うなずき。姿勢の間には必ず基準（頭を楽な位置に戻す）が入ります。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。`;
+}
+$('protocol').onchange = protocolNote; $('preset').onchange = protocolNote;
 $('camSel').onchange = () => { if (S.running) { stopCamera(); start(); } };
 $('csvBtn').onclick = () => save(fileId() + '.csv', toCSV(S.last.rows), 'text/csv');
 $('jsonBtn').onclick = () => save(fileId() + '.json', JSON.stringify({ meta: meta(), events: S.last.events, rows: S.last.rows }), 'application/json');
 $('videoBtn').onclick = () => { if (S.lastVideo) save(fileId() + '.' + S.lastVideo.ext, S.lastVideo.blob); };
 $('maskBtn').onclick = () => { S.showMask = !S.showMask; $('maskBtn').textContent = S.showMask ? '検出範囲の表示を消す' : '色の検出範囲を表示'; if (S.phase === 'frozen') redrawSnap(); };
-$('resetBtn').onclick = () => { S.markers = {}; S.level = []; applySensorRoll(); $('rollInfo').textContent = rollText(); selectTarget('tragus'); if (S.phase === 'frozen') { setPhase('frozen'); redrawSnap(); } };
+$('resetBtn').onclick = () => { S.markers = {}; updateClash(); S.level = []; applySensorRoll(); $('rollInfo').textContent = rollText(); selectTarget('tragus'); if (S.phase === 'frozen') { setPhase('frozen'); redrawSnap(); } };
 $('levelResetBtn').onclick = () => { S.level = []; applySensorRoll(); $('rollInfo').textContent = rollText(); if (S.phase === 'frozen') redrawSnap(); };
-const bind = (id, key) => { $(id).oninput = e => { S[key] = +e.target.value; $(id + 'V').textContent = e.target.value; if (key === 'hTol') Object.values(S.markers).forEach(m => m.color.hTol = S.hTol); }; };
+const bind = (id, key) => { $(id).oninput = e => { S[key] = +e.target.value; $(id + 'V').textContent = e.target.value; if (key === 'hTol') { Object.values(S.markers).forEach(m => { m.color.hTol = Math.min(S.hTol, m.color.hAuto ?? S.hTol); if (S.snapImg) m.clash = colorClash(S.snapImg, m.color, { x: m.snapPos[0] * S.k, y: m.snapPos[1] * S.k, area: m.snapArea * S.k * S.k }); }); updateClash(); if (S.phase === 'frozen') redrawSnap(); } }; };
 bind('hTol', 'hTol'); bind('minArea', 'minArea'); bind('proc', 'procLong');
 addEventListener('resize', () => { layout(); if (S.phase === 'frozen') redrawSnap(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && (S.phase === 'recording' || S.phase === 'countdown')) stopRec('画面が非表示になったため記録を停止しました。保存してください。'); });
