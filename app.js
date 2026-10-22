@@ -4,7 +4,7 @@
 // 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
 // 0.4.0：姿勢の間に基準を挟む、posture-labとの同時計測用の案内、色の判定を厳しく（マーカー自身の色の幅から決める）、大きさの急変を除外、色の重なりの警告
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const $ = id => document.getElementById(id);
 const video = $('video'), snap = $('snap'), overlay = $('overlay'), octx = overlay.getContext('2d');
 const proc = document.createElement('canvas'), pctx = proc.getContext('2d', { willReadFrequently: true });
@@ -511,7 +511,7 @@ function startRec() {
   if (sec) say('記録を始めます。写真と同じ位置で、正面を向いてください');
   countdown(sec, () => {
     const preset = $('preset').value; PROTOCOL = PRESETS[preset].map(x => x[0]); SAYS = PRESETS[preset].map(x => x[1]);
-    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, holdMs: hold, transitionMs: trans, nod: NOD } : null };
+    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null } : null };
     S.step = -1;
     if (auto) { S.stage = 'prep'; S.rowLabel = '準備'; } else { S.stage = 'manual'; S.rowLabel = S.label; }
     S.rec.events.push(ev('record_start'));
@@ -519,6 +519,21 @@ function startRec() {
     setPhase('recording'); $('recStatus').classList.add('on'); $('recStatus').textContent = '記録中…';
     if (auto) runProtocol(hold, trans);
   });
+}
+// 途中の基準：CVAが3秒間ほぼ一定（変動2°以内）になったら次へ。最短5秒、最長は1姿勢の時間。
+// 「最初の基準と同じ値に戻ったか」では判定しない（再現性の評価が甘くなるため）。
+async function holdUntilStable(step, maxMs) {
+  const t0 = performance.now(), minMs = Math.min(5000, maxMs), win = 3000, tol = 2;
+  for (;;) {
+    await sleep(200); if (!S.rec) return;
+    const t = performance.now(), el = t - t0;
+    if (el >= maxMs) { S.rec.events.push(ev('hold_end', { step, reason: 'timeout', ms: Math.round(el) })); return; }
+    if (el < minMs) continue;
+    const v = S.rec.rows.filter(r => r.perf_ms >= t - win && r.valid).map(r => r.cva_deg), all = S.rec.rows.filter(r => r.perf_ms >= t - win).length;
+    if (v.length >= 10 && v.length >= 0.8 * all && Math.max(...v) - Math.min(...v) <= tol) {
+      S.rec.events.push(ev('hold_end', { step, reason: 'stable', ms: Math.round(el), range_deg: +(Math.max(...v) - Math.min(...v)).toFixed(2) })); return;
+    }
+  }
 }
 // 自動の案内：準備 → うなずき（検出まで）→［案内中 → 移行中 → 姿勢］×5 → うなずき（検出まで）→ 終了
 async function runProtocol(hold, trans) {
@@ -531,7 +546,9 @@ async function runProtocol(hold, trans) {
     const l = PROTOCOL[i];
     setStage('guide', '案内中', i); beep(880, 150); await sayWait(SAYS[i]); if (!alive()) return;
     if (trans) { setStage('transition', '移行中', i); await sleep(trans); if (!alive()) return; }
-    setStage('hold', l, i); await sleep(hold); if (!alive()) return;
+    setStage('hold', l, i);
+    if (l === '基準' && i > 0 && $('quickBase').checked) await holdUntilStable(i, hold); else await sleep(hold);
+    if (!alive()) return;
   }
   setStage('nod', 'うなずき', PROTOCOL.length); beep(1000, 200); S.rec.events.push(ev('sync_cue', { which: 'end' })); say('最後に、素早く1回うなずいてください');
   const ok = await nodOrTimeout('end', NOD.endMax); if (!alive()) return;
