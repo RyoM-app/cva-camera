@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>CVAカメラ — 1人で側面からCVAを測る</title>
+<link rel="stylesheet" href="styles.css?v=0.2.0">
+</head>
+<body>
+<main>
+<header>
+  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.2.0</div><h1>CVAカメラ</h1></div>
+  <span class="badge">実験用・未検証</span>
+</header>
+<p class="intro">体の横に置いたスマホの内カメラで、耳珠・C7・肩峰の色マーカーを追跡し、CVAと渡邉角を記録します。1人で使えるように、撮影と記録開始にセルフタイマーと音声の案内があります。映像は保存・送信しません。</p>
+
+<div class="layout">
+  <section class="card camera-card">
+    <div class="preview" id="preview">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="snap" hidden></canvas>
+      <canvas id="overlay"></canvas>
+      <div id="previewHint">「内カメラを開始」を押してください</div>
+      <div id="countdown" hidden></div>
+      <span class="mode-label" id="modeLabel">待機中</span>
+    </div>
+    <div class="live">
+      <div class="metric featured"><span>CVA</span><strong id="cvaValue">—</strong><small>C7の水平線と C7→耳珠 のなす角</small></div>
+      <div class="metric"><span>渡邉角</span><strong id="watValue">—</strong><small>肩峰→耳珠 と鉛直線のなす角</small></div>
+    </div>
+    <div class="chips"><span id="chipT">耳珠：未設定</span><span id="chipC">C7：未設定</span><span id="chipA">肩峰：未設定</span><span id="chipFps">— fps</span><span id="chipTilt">端末の傾き：—</span></div>
+  </section>
+
+  <div>
+    <section class="card">
+      <h2>1<span>内カメラを開始</span></h2>
+      <p>スマホを体の真横（体の側面に直交）に、画面を自分に向けて立てます。高さは肩（C7）に合わせ、1〜2 m離します。</p>
+      <div class="actions">
+        <button class="primary" id="startBtn">内カメラを開始</button>
+        <button id="stopBtn" disabled>カメラを停止</button>
+      </div>
+      <p id="status" role="status">待機中です。HTTPSで開いてください。</p>
+    </section>
+
+    <section class="card">
+      <h2>2<span>写真を撮って、マーカーを指定</span></h2>
+      <p>セルフタイマーで1枚撮ります。撮影の合図の音が鳴るまで、正面を向いて楽な姿勢でいてください。</p>
+      <div class="input-row">
+        <label>セルフタイマー<select id="snapTimer"><option value="0">すぐ</option><option value="3">3秒</option><option value="5" selected>5秒</option><option value="10">10秒</option></select></label>
+        <button class="primary" id="snapBtn" disabled>写真を撮る</button>
+        <button id="retakeBtn" disabled>撮り直す</button>
+      </div>
+      <div id="tapPanel" hidden>
+        <p>写真の中のマーカーを、ボタンの順にタップします。</p>
+        <div class="seg" role="group" aria-label="指定する部位">
+          <button data-target="tragus" class="sel">耳珠</button>
+          <button data-target="c7">C7</button>
+          <button data-target="acromion">肩峰（任意）</button>
+          <button data-target="level">水平線（任意）</button>
+        </div>
+        <p class="note" id="tapHint">耳珠のマーカーをタップしてください。</p>
+      </div>
+      <details>
+        <summary>検出の調整</summary>
+        <label>色相の許容幅（度） <b id="hTolV">18</b><input type="range" id="hTol" min="6" max="40" value="18"></label>
+        <label>最小の大きさ（処理画素） <b id="minAreaV">8</b><input type="range" id="minArea" min="2" max="60" value="8"></label>
+        <label>処理の解像度（長辺の画素） <b id="procV">640</b><input type="range" id="proc" min="320" max="960" step="80" value="640"></label>
+        <div class="actions"><button id="maskBtn">色の検出範囲を表示</button><button id="resetBtn">指定をすべて解除</button></div>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>3<span>記録</span></h2>
+      <div class="input-row">
+        <label>開始までの待ち時間<select id="recTimer"><option value="0">すぐ</option><option value="3">3秒</option><option value="5" selected>5秒</option><option value="10">10秒</option></select></label>
+        <label>進め方<select id="protocol"><option value="auto" selected>音声で姿勢を案内（自動）</option><option value="manual">手動でラベルを押す</option></select></label>
+        <label>1姿勢の時間（秒）<input type="number" id="holdSec" min="3" max="60" value="10"></label>
+      </div>
+      <p class="note" id="protocolNote">自動：うなずき → 基準 → うつむく → 顎を突き出す → 目線だけ下げる → 基準 → うなずき の順に、音声で案内して自動で終わります。</p>
+      <div class="actions">
+        <button class="primary" id="recBtn" disabled>記録スタート</button>
+        <button id="syncBtn" disabled>同期の合図</button>
+      </div>
+      <div class="seg labels" id="labelBtns" role="group" aria-label="姿勢のラベル">
+        <button data-label="基準" class="sel">基準</button>
+        <button data-label="うつむく">うつむく</button>
+        <button data-label="顎を突き出す">顎を突き出す</button>
+        <button data-label="目線だけ下げる">目線だけ下げる</button>
+        <button data-label="自由">自由</button>
+      </div>
+      <p id="recStatus">未記録</p>
+    </section>
+
+    <section class="card">
+      <h2>4<span>保存</span></h2>
+      <div class="actions">
+        <button id="csvBtn" disabled>CSVを保存</button>
+        <button id="jsonBtn" disabled>全記録JSONを保存</button>
+      </div>
+      <p class="note">CSV：時刻（posture-labと同じUnix時刻[ms]）、各マーカーの座標、CVA、渡邉角、姿勢のラベル。JSON：CSVの内容に加え、色の設定・解像度・案内と同期のイベント。</p>
+    </section>
+  </div>
+</div>
+<footer>CVAカメラ 0.2.0 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
+</main>
+<script src="app.js?v=0.2.0"></script>
+</body>
+</html>
