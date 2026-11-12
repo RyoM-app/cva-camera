@@ -3,8 +3,17 @@
 // 流れ：カメラを開始 → セルフタイマーで1枚撮影 → 写真の上でマーカーをタップ → 記録スタート（ライブ映像で追跡）
 // 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
 // 0.4.0：姿勢の間に基準を挟む、posture-labとの同時計測用の案内、色の判定を厳しく（マーカー自身の色の幅から決める）、大きさの急変を除外、色の重なりの警告
+// 0.5.0：本実験用。被験者・条件・回の入力とファイル名、「スタンド固定」の案内、猫背、時計の組、画面の消灯防止、終了時の品質判定
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.4.1';
+const VERSION = '0.5.0';
+// 終了時の品質判定（本実験の「事前に決める除外基準」に合わせる）。満たさなければ「やり直し推奨」
+const QUALITY = {
+  minDetectionRate: 0.95,       // 耳珠・C7の検出率がこれ未満 → その回を除外
+  requiredMarkers: ['tragus', 'c7'],
+  nodsRequired: 2,              // うなずきの検出（最初と最後）。アプリでは相互相関は使えないので、2/2でなければ推奨を出す
+  maxColorClash: 0.3,           // 同じ色が肌・服・背景にマーカーの30%以上 → 追跡が外れやすい
+};
+const SUBJECT_KEY = 'cva-camera.subject.v1', SUBJECTS_KEY = 'cva-camera.subjects.v1';   // 前回の入力と、被験者ごとの L・眼鏡
 const $ = id => document.getElementById(id);
 const video = $('video'), snap = $('snap'), overlay = $('overlay'), octx = overlay.getContext('2d');
 const proc = document.createElement('canvas'), pctx = proc.getContext('2d', { willReadFrequently: true });
@@ -12,6 +21,10 @@ const comp = document.createElement('canvas'), cctx = comp.getContext('2d');   /
 const NAMES = { tragus: '耳珠', c7: 'C7', acromion: '肩峰' };
 // 案内の手順。姿勢と姿勢の間には必ず「基準」（頭を楽な位置に戻す）を挟む
 const BACK = '頭を楽な位置に戻して、正面を見てください';
+// 本実験の基準の声かけは、条件ごとに毎回同じ文言にする（基準姿勢を強制する仕組みは入れない）
+const BASE_STAND = '画面を楽に正面から見てください';
+const BASE_HAND = 'スマホを目の高さに持って、楽に正面を見てください';
+const SLOUCH = '背中を丸めて、肩を前に出してください。腰から前に倒れないでください';   // 猫背。前かがみ（腰から倒す）と区別する
 const PRESETS = {
   basic: [
     ['基準', '楽な姿勢で、正面を見てください'],
@@ -19,14 +32,23 @@ const PRESETS = {
     ['顎を突き出す', '顎を前に突き出してください'], ['基準', BACK],
     ['目線だけ下げる', '頭は楽な位置のまま、目線だけを下げてください'], ['基準', BACK],
   ],
-  dual: [   // posture-labのスマホを手に持って同時に計測するとき
-    ['基準', 'スマホを目の高さに持ち、頭を楽な位置にして、画面を見てください'],
-    ['うつむく', 'スマホを胸の高さに下げて、うつむいて画面を見てください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
-    ['顎を突き出す', 'スマホを胸の高さに下げて、顎を前に突き出して画面を見てください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
-    ['目線だけ下げる', 'スマホを胸の高さに下げて、頭は動かさず、目線だけで画面を見てください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
-    ['端末だけ動かす', '頭は動かさず、スマホだけをゆっくり上下に動かしてください'], ['基準', 'スマホを目の高さに戻し、頭を楽な位置に戻してください'],
+  stand: [   // 本実験の主条件：posture-labのスマホをスタンドに固定して同時に計測する（9区間）
+    ['基準', BASE_STAND],
+    ['うつむく', '頭を下げて、手元を見るようにうつむいてください'], ['基準', BASE_STAND],
+    ['顎を突き出す', '画面を見たまま、顎を前に突き出してください'], ['基準', BASE_STAND],
+    ['猫背', '画面を見たまま、' + SLOUCH], ['基準', BASE_STAND],
+    ['目線だけ下げる', '頭は動かさず、目線だけを下げてください'], ['基準', BASE_STAND],
+  ],
+  dual: [   // posture-labのスマホを手に持って同時に計測するとき（本実験の手持ちの回、11区間）
+    ['基準', BASE_HAND],
+    ['うつむく', 'スマホを胸の高さに下げて、うつむいて画面を見てください'], ['基準', BASE_HAND],
+    ['顎を突き出す', 'スマホを胸の高さに下げて、顎を前に突き出して画面を見てください'], ['基準', BASE_HAND],
+    ['猫背', 'スマホを胸の高さに下げて、画面を見たまま、' + SLOUCH], ['基準', BASE_HAND],
+    ['目線だけ下げる', 'スマホを胸の高さに下げて、頭は動かさず、目線だけで画面を見てください'], ['基準', BASE_HAND],
+    ['端末だけ動かす', '頭は動かさず、スマホだけをゆっくり上下に動かしてください'], ['基準', BASE_HAND],
   ],
 };
+const PRESET_FOR = { fixed: 'stand', hand: 'dual' };   // 条件から案内の内容を選ぶ（練習は選んだまま）
 let PROTOCOL = PRESETS.basic.map(x => x[0]), SAYS = PRESETS.basic.map(x => x[1]);
 const NOD = { drop: 6, back: 3, startMax: 8000, endMax: 12000, after: 1500 };   // うなずき：基準から6°以上下がり、3°以内に戻ったら検出
 
@@ -427,8 +449,12 @@ async function start() {
   $('startBtn').disabled = true; $('stopBtn').disabled = false;
   const st = S.stream.getVideoTracks()[0].getSettings();
   setStatus(`${S.cam === 'user' ? '内' : '外'}カメラ：${st.width}×${st.height}、${st.frameRate ? st.frameRate.toFixed(0) : '?'} fps。画面は左右反転していません（記録と同じ向き）。水色の点線が、センサーで求めた水平です。`);
-  try { if ('wakeLock' in navigator) S.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+  await keepAwake();
   video.requestVideoFrameCallback ? video.requestVideoFrameCallback(loop) : requestAnimationFrame(t => loop(t, null));
+}
+// 画面が消えないようにする。画面が非表示になると解除されるので、記録の開始時にも取り直す
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && (!S.wake || S.wake.released)) S.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
 }
 function stopCamera() {
   if (S.phase === 'recording' || S.phase === 'countdown') stopRec('カメラを停止したため記録を停止しました。');
@@ -504,7 +530,60 @@ function setStage(stage, rowLabel, step = S.step) {   // 自動の案内の区�
   if (stage === 'hold') setLabel(PROTOCOL[step], false);
   if (S.rec) S.rec.events.push(ev('stage', { stage, label: rowLabel, step, target_label: step >= 0 && step < PROTOCOL.length ? PROTOCOL[step] : '' }));
 }
+// ---------------------------------------------------------------- 被験者・条件・回（前回の値を覚える）
+const COND_NAMES = { fixed: '固定', hand: '手持ち', practice: '練習' };
+function readJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } }
+function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function subjectForm() {
+  const id = $('subjId').value.trim().toUpperCase(), L = $('tragusC7').value === '' ? null : +$('tragusC7').value;
+  return { id, condition: $('condition').value, run: +$('runNo').value || null, memo: $('memo').value.trim(), tragusC7Cm: L, glasses: $('glasses').value || null };
+}
+function checkSubject(f) {
+  if (!/^P\d{2}$/.test(f.id)) return '被験者IDを P01 の形（Pと数字2桁）で入力してください';
+  if (!(f.run >= 1)) return '回番号を1以上で入力してください';
+  if (f.tragusC7Cm !== null && !(f.tragusC7Cm >= 5 && f.tragusC7Cm <= 30)) return '耳珠〜C7の長さ L は5〜30 cmで入力してください';
+  return null;
+}
+function rememberSubject(f) {
+  writeJSON(SUBJECT_KEY, f);
+  const all = readJSON(SUBJECTS_KEY, {}); all[f.id] = { tragusC7Cm: f.tragusC7Cm, glasses: f.glasses }; writeJSON(SUBJECTS_KEY, all);
+}
+function restoreSubject() {
+  const f = readJSON(SUBJECT_KEY, null); if (!f) return;
+  $('subjId').value = f.id || ''; $('condition').value = f.condition || 'fixed'; $('runNo').value = f.run || 1; $('memo').value = f.memo || '';
+  $('tragusC7').value = f.tragusC7Cm ?? ''; $('glasses').value = f.glasses || '';
+}
+function fillSubjectInfo() {   // 同じ被験者の2回目以降は、L と眼鏡を引き継ぐ
+  const p = readJSON(SUBJECTS_KEY, {})[$('subjId').value.trim().toUpperCase()];
+  if (p) { $('tragusC7').value = p.tragusC7Cm ?? ''; $('glasses').value = p.glasses || ''; }
+}
+function applyCondition() { const pr = PRESET_FOR[$('condition').value]; if (pr) $('preset').value = pr; protocolNote(); }
+
+// ---------------------------------------------------------------- 終了時の品質判定
+function judgeQuality(last) {
+  const reasons = [], rates = {};
+  for (const n of QUALITY.requiredMarkers) {
+    const d = last.detection[n]; rates[n] = d ? d.rate : null;
+    if (!d || d.rate === null) reasons.push(`${NAMES[n]}のマーカーが設定されていません`);
+    else if (d.rate < QUALITY.minDetectionRate) reasons.push(`${NAMES[n]}の検出率が ${Math.round(d.rate * 100)}%（${Math.round(QUALITY.minDetectionRate * 100)}%以上が必要）`);
+  }
+  const nods = last.events.filter(e => e.type === 'nod_detected').length;
+  if (last.protocol) {
+    if (nods < QUALITY.nodsRequired) reasons.push(`うなずきの検出が ${nods}/${QUALITY.nodsRequired}（時刻合わせができない可能性があります）`);
+    if (!last.events.some(e => e.type === 'sync_cue' && e.which === 'end')) reasons.push('案内が最後まで進んでいません（途中で停止しました）');
+  }
+  for (const [n, d] of Object.entries(last.detection)) if (d.colorClash > QUALITY.maxColorClash) reasons.push(`${NAMES[n]}の色が肌・服・背景にもあります（マーカーの${Math.round(d.colorClash * 100)}%）`);
+  return { ok: !reasons.length, verdict: reasons.length ? 'やり直し推奨' : 'OK', reasons, detectionRates: rates, nodsDetected: nods, rules: QUALITY };
+}
+function showQuality(q) {
+  const box = $('qualityBox'); box.hidden = false; box.className = 'quality ' + (q.ok ? 'ok' : 'ng');
+  box.innerHTML = `<strong>${q.verdict}</strong>${q.ok ? '<span>検出率・うなずき・色の判定は、すべて基準を満たしています。</span>' : '<ul>' + q.reasons.map(r => `<li>${r}</li>`).join('') + '</ul><span>この回だけやり直してください。</span>'}`;
+}
+
 function startRec() {
+  const subj = subjectForm(), bad = checkSubject(subj);
+  if (bad) { setStatus(bad, true); return; }
+  rememberSubject(subj); keepAwake();
   for (const mk of Object.values(S.markers)) { mk.lost = 0; mk.found = 0; mk.frames = 0; mk.aRef = mk.snapArea; mk.prev = [mk.snapPos[0] * S.k, mk.snapPos[1] * S.k]; }
   setPhase('countdown');
   const auto = $('protocol').value === 'auto', hold = Math.max(3, +$('holdSec').value || 10) * 1000, trans = Math.max(0, +$('transSec').value || 0) * 1000, sec = +$('recTimer').value;
@@ -514,6 +593,8 @@ function startRec() {
     S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null } : null };
     S.step = -1;
     if (auto) { S.stage = 'prep'; S.rowLabel = '準備'; } else { S.stage = 'manual'; S.rowLabel = S.label; }
+    S.rec.subject = subj;
+    S.rec.clock = { dateNowMs: Date.now(), perfNowMs: +performance.now().toFixed(3), timeOrigin: performance.timeOrigin, note: '記録開始時の Date.now() と performance.now() の組。2台の時計のずれを後で見積もるため' };
     S.rec.events.push(ev('record_start'));
     startVideo();
     setPhase('recording'); $('recStatus').classList.add('on'); $('recStatus').textContent = '記録中…';
@@ -565,6 +646,7 @@ function stopRec(msg) {
     S.last.detection = Object.fromEntries(Object.entries(S.markers).map(([n, m]) => [n, { found: m.found, frames: m.frames, rate: m.frames ? +(m.found / m.frames).toFixed(3) : null, colorClash: +m.clash.toFixed(3) }]));
     const det = Object.entries(S.last.detection).map(([n, d]) => `${NAMES[n]} ${Math.round(100 * (d.rate ?? 0))}%`).join('・');
     $('recStatus').textContent = `${msg || '記録を停止しました。'}（${S.last.rows.length}行、CVAが求まった割合 ${(v / Math.max(1, S.last.rows.length) * 100).toFixed(0)}%、検出：${det}${S.last.protocol ? `、うなずき検出 ${nods}/2` : ''}）`;
+    S.last.quality = judgeQuality(S.last); showQuality(S.last.quality);
     say('記録を終了しました'); beep(520, 300);
   }
   S.stage = 'manual'; S.rowLabel = S.label; S.step = -1;
@@ -574,7 +656,7 @@ function stopRec(msg) {
 function meta() {
   const st = S.stream ? S.stream.getVideoTracks()[0].getSettings() : {};
   return {
-    app: 'cva-camera', version: VERSION, camera: S.cam === 'user' ? 'user (front)' : 'environment (rear)', createdAt: S.last.startedAt, stoppedAt: S.last.stoppedAt,
+    app: 'cva-camera', version: VERSION, subject: S.last.subject ?? null, clock: S.last.clock ?? null, quality: S.last.quality ?? null, camera: S.cam === 'user' ? 'user (front)' : 'environment (rear)', createdAt: S.last.startedAt, stoppedAt: S.last.stoppedAt,
     timeOrigin: performance.timeOrigin, userAgent: navigator.userAgent,
     video: { width: video.videoWidth, height: video.videoHeight, settings: st, mirrored: false },
     processing: { longSide: S.procLong, minArea: S.minArea }, protocol: S.last.protocol,
@@ -594,7 +676,8 @@ function save(name, blobOrText, type) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
 }
-const fileId = () => 'cva-' + S.last.startedAt.replace(/[:.]/g, '-');
+// ファイル名：P01_fixed1_cva_<時刻>（被験者の入力がない古い記録は cva-<時刻>）
+const fileId = () => { const t = S.last.startedAt.replace(/[:.]/g, '-'), sj = S.last.subject; return sj ? `${sj.id}_${sj.condition}${sj.run}_cva_${t}` : 'cva-' + t; };
 function toCSV(rows) { if (!rows.length) return ''; const k = Object.keys(rows[0]); return '﻿' + [k.join(','), ...rows.map(r => k.map(x => r[x]).join(','))].join('\n'); }
 
 // ---------------------------------------------------------------- 結線
@@ -608,9 +691,11 @@ $('syncBtn').onclick = () => { if (S.rec) { S.rec.events.push(ev('sync')); setSt
 function protocolNote() {
   if ($('protocol').value !== 'auto') { $('protocolNote').textContent = '手動：姿勢を変えるたびにラベルを押してください。記録停止も手動です。'; return; }
   const steps = PRESETS[$('preset').value].map(x => x[0]);
-  $('protocolNote').textContent = `自動：うなずき → ${steps.join(' → ')} → うなずき。姿勢の間には必ず基準（頭を楽な位置に戻す）が入ります。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。`;
+  $('protocolNote').textContent = `自動：うなずき → ${steps.join(' → ')} → うなずき（姿勢と基準で${steps.length}区間）。姿勢の間には必ず基準が入ります。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。`;
 }
 $('protocol').onchange = protocolNote; $('preset').onchange = protocolNote;
+$('condition').onchange = applyCondition; $('subjId').onchange = fillSubjectInfo;
+restoreSubject(); applyCondition();
 $('camSel').onchange = () => { if (S.running) { stopCamera(); start(); } };
 $('csvBtn').onclick = () => save(fileId() + '.csv', toCSV(S.last.rows), 'text/csv');
 $('jsonBtn').onclick = () => save(fileId() + '.json', JSON.stringify({ meta: meta(), events: S.last.events, rows: S.last.rows }), 'application/json');
@@ -624,3 +709,4 @@ addEventListener('resize', () => { layout(); if (S.phase === 'frozen') redrawSna
 document.addEventListener('visibilitychange', () => { if (document.hidden && (S.phase === 'recording' || S.phase === 'countdown')) stopRec('画面が非表示になったため記録を停止しました。保存してください。'); });
 window.__cva = S;   // 動作確認用
 window.__cvaGrav = onGrav;
+window.__cvaMeta = () => (S.last ? meta() : null);

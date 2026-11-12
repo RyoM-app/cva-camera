@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>CVAカメラ — 1人で側面からCVAを測る</title>
-<link rel="stylesheet" href="styles.css?v=0.4.1">
+<link rel="stylesheet" href="styles.css?v=0.5.0">
 </head>
 <body>
 <main>
 <header>
-  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.4.1</div><h1>CVAカメラ</h1></div>
+  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.5.0</div><h1>CVAカメラ</h1></div>
   <span class="badge">実験用・未検証</span>
 </header>
 <p class="intro">体の横に置いたスマホのカメラで、耳珠・C7・肩峰の色マーカーを追跡し、CVAと渡邉角を記録します。1人で使えるように、撮影と記録開始にセルフタイマーと音声の案内があります。カメラの傾きは重力センサーで自動補正します。映像は、選んだときだけ端末に保存し、どこにも送信しません。</p>
@@ -74,10 +74,23 @@
 
     <section class="card">
       <h2>3<span>記録</span></h2>
+      <div class="subject" aria-label="被験者と条件">
+        <div class="input-row">
+          <label>被験者ID<input id="subjId" type="text" inputmode="latin" autocapitalize="characters" placeholder="P01" maxlength="3"></label>
+          <label>条件<select id="condition"><option value="fixed" selected>固定（スタンド）</option><option value="hand">手持ち</option><option value="practice">練習</option></select></label>
+          <label>回番号<input id="runNo" type="number" min="1" max="9" value="1"></label>
+        </div>
+        <div class="input-row">
+          <label>耳珠〜C7の長さ L（cm）<input id="tragusC7" type="number" inputmode="decimal" min="5" max="30" step="0.1" placeholder="例：12.5"></label>
+          <label>眼鏡<select id="glasses"><option value="">未入力</option><option value="glasses">眼鏡</option><option value="contacts">コンタクト</option><option value="none">なし</option></select></label>
+          <label class="wide">メモ<input id="memo" type="text" placeholder="任意"></label>
+        </div>
+        <p class="note">前回の値を覚えています。同じ被験者の2回目以降は、条件と回番号だけ変えてください（L と眼鏡は被験者IDから引き継ぎます）。ファイル名は <code>P01_fixed1_cva_時刻</code> の形になります。条件を選ぶと、案内の内容も合わせて切り替わります。</p>
+      </div>
       <div class="input-row">
         <label>開始までの待ち時間<select id="recTimer"><option value="0">すぐ</option><option value="3">3秒</option><option value="5" selected>5秒</option><option value="10">10秒</option></select></label>
         <label>進め方<select id="protocol"><option value="auto" selected>音声で姿勢を案内（自動）</option><option value="manual">手動でラベルを押す</option></select></label>
-        <label>案内の内容<select id="preset"><option value="basic" selected>CVAカメラだけ（7区間）</option><option value="dual">posture-labと同時（スマホを手に持つ、9区間）</option></select></label>
+        <label>案内の内容<select id="preset"><option value="stand">スタンド固定（posture-labと同時、本実験の主条件、9区間）</option><option value="dual">posture-labと同時（スマホを手に持つ、11区間）</option><option value="basic" selected>CVAカメラだけ（7区間）</option></select></label>
         <label>1姿勢の時間（秒）<input type="number" id="holdSec" min="3" max="60" value="10"></label>
         <label>移行の時間（秒）<input type="number" id="transSec" min="0" max="15" value="3"></label>
         <label class="check"><input type="checkbox" id="quickBase" checked> 途中の基準は、安定したら次へ（5秒〜1姿勢の時間）</label>
@@ -93,11 +106,13 @@
         <button data-label="基準" class="sel">基準</button>
         <button data-label="うつむく">うつむく</button>
         <button data-label="顎を突き出す">顎を突き出す</button>
+        <button data-label="猫背">猫背</button>
         <button data-label="目線だけ下げる">目線だけ下げる</button>
         <button data-label="端末だけ動かす">端末だけ動かす</button>
         <button data-label="自由">自由</button>
       </div>
       <p id="recStatus">未記録</p>
+      <div id="qualityBox" class="quality" hidden></div>
     </section>
 
     <section class="card">
@@ -111,8 +126,8 @@
     </section>
   </div>
 </div>
-<footer>CVAカメラ 0.4.1 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
+<footer>CVAカメラ 0.5.0 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
 </main>
-<script src="app.js?v=0.4.1"></script>
+<script src="app.js?v=0.5.0"></script>
 </body>
 </html>
