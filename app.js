@@ -4,13 +4,15 @@
 // 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
 // 0.4.0：姿勢の間に基準を挟む、posture-labとの同時計測用の案内、色の判定を厳しく（マーカー自身の色の幅から決める）、大きさの急変を除外、色の重なりの警告
 // 0.5.0：本実験用。被験者・条件・回の入力とファイル名、「スタンド固定」の案内、猫背、時計の組、画面の消灯防止、終了時の品質判定
+// 0.5.1：うなずきの検出を緩める（10°下がって深さの半分戻る、12秒）、1/2は「注意」、各行に wall_ms、固定の「うつむく」の声かけ
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 // 終了時の品質判定（本実験の「事前に決める除外基準」に合わせる）。満たさなければ「やり直し推奨」
 const QUALITY = {
   minDetectionRate: 0.95,       // 耳珠・C7の検出率がこれ未満 → その回を除外
   requiredMarkers: ['tragus', 'c7'],
-  nodsRequired: 2,              // うなずきの検出（最初と最後）。アプリでは相互相関は使えないので、2/2でなければ推奨を出す
+  nodsRequired: 2,              // うなずきの検出（最初と最後）。1/2 は「注意」（解析でCVAの谷と相互相関で救える）、0/2 だけ「やり直し推奨」
+  nodsMinimum: 1,
   maxColorClash: 0.3,           // 同じ色が肌・服・背景にマーカーの30%以上 → 追跡が外れやすい
 };
 const SUBJECT_KEY = 'cva-camera.subject.v1', SUBJECTS_KEY = 'cva-camera.subjects.v1';   // 前回の入力と、被験者ごとの L・眼鏡
@@ -34,7 +36,7 @@ const PRESETS = {
   ],
   stand: [   // 本実験の主条件：posture-labのスマホをスタンドに固定して同時に計測する（9区間）
     ['基準', BASE_STAND],
-    ['うつむく', '頭を下げて、手元を見るようにうつむいてください'], ['基準', BASE_STAND],
+    ['うつむく', '画面を見たまま、首を曲げて、あごを引くようにうつむいてください'], ['基準', BASE_STAND],
     ['顎を突き出す', '画面を見たまま、顎を前に突き出してください'], ['基準', BASE_STAND],
     ['猫背', '画面を見たまま、' + SLOUCH], ['基準', BASE_STAND],
     ['目線だけ下げる', '頭は動かさず、目線だけを下げてください'], ['基準', BASE_STAND],
@@ -50,7 +52,9 @@ const PRESETS = {
 };
 const PRESET_FOR = { fixed: 'stand', hand: 'dual' };   // 条件から案内の内容を選ぶ（練習は選んだまま）
 let PROTOCOL = PRESETS.basic.map(x => x[0]), SAYS = PRESETS.basic.map(x => x[1]);
-const NOD = { drop: 6, back: 3, startMax: 8000, endMax: 12000, after: 1500 };   // うなずき：基準から6°以上下がり、3°以内に戻ったら検出
+// うなずき（0.5.1）：基準＝合図の直前1秒のCVAの中央値（記録開始から1秒以内のフレームは使わない）。
+// 基準から drop 度以上下がり、その最小値から深さ（基準−最小値）の backFraction 以上戻ったら検出。待ち時間は最初・最後とも12秒
+const NOD = { drop: 10, backFraction: 0.5, baseWindowMs: 1000, skipFirstMs: 1000, startMax: 12000, endMax: 12000, after: 1500, back: null };   // back は 0.4.x の「基準から3°以内に戻る」（使わない）
 
 const S = {
   stream: null, running: false, phase: 'idle',   // idle | live | frozen | countdown | recording
@@ -365,30 +369,39 @@ function record(t, meta, ang) {
   row.cva_deg = ang.cva === null ? '' : +ang.cva.toFixed(2); row.watanabe_deg = ang.wat === null ? '' : +ang.wat.toFixed(2);
   row.valid = ang.cva === null ? 0 : 1;
   row.device_roll_deg = S.devRoll === null ? '' : +S.devRoll.toFixed(2); row.device_pitch_deg = S.devPitch === null ? '' : +S.devPitch.toFixed(2);
+  row.wall_ms = wallMs(t);   // 0.5.1：最後の列に追加（既存の列の位置は変えない）
   S.rec.rows.push(row);
   if (S.rec.rows.length % 15 === 0) $('recStatus').textContent = `記録中：${S.rec.rows.length}行（${((t - S.rec.t0) / 1000).toFixed(0)}秒）・${S.rowLabel}`;
 }
 
 // ---------------------------------------------------------------- うなずきの検出
-// 合図の直前1.5秒のCVAの中央値を基準にし、そこから NOD.drop 度以上下がって、NOD.back 度以内に戻ったら検出。
-function startNodWatch(which) {
-  const t = performance.now(), prev = S.rec.rows.filter(r => r.valid && r.perf_ms >= t - 1500).map(r => r.cva_deg).sort((a, b) => a - b);
-  return new Promise(res => { S.nodWatch = { which, t0: t, base: prev.length >= 3 ? prev[prev.length >> 1] : null, min: Infinity, minT: null, deep: false, res }; });
+// 純粋な関数（nodBase・nodStep）は、記録済みのデータで確かめられるようにしてある
+function nodBase(rows, t, t0) {   // 合図の直前 baseWindowMs のCVAの中央値。記録開始から skipFirstMs 以内の行は除く
+  const v = rows.filter(r => r.valid && r.perf_ms >= t - NOD.baseWindowMs && r.perf_ms <= t && r.perf_ms >= t0 + NOD.skipFirstMs).map(r => r.cva_deg).sort((a, b) => a - b);
+  return v.length >= 3 ? v[v.length >> 1] : null;
 }
-function watchNod(t, cva) {
-  const w = S.nodWatch; if (!w || cva === null) return;
-  if (w.base === null) { w.base = cva; return; }   // 直前のデータがなければ、最初の値を基準にする
+function nodStep(w, t, cva) {     // 1フレームぶん進める。検出したら true
+  if (cva === null) return false;
+  if (w.base === null) { if (t >= w.recT0 + NOD.skipFirstMs) w.base = cva; return false; }   // 直前のデータがなければ、使える最初の値を基準にする
   if (cva < w.min) { w.min = cva; w.minT = t; }
   if (w.base - cva >= NOD.drop) w.deep = true;
-  if (w.deep && cva >= w.base - NOD.back) {
-    S.rec.events.push(ev('nod_detected', { which: w.which, base_cva: +w.base.toFixed(2), min_cva: +w.min.toFixed(2), depth_deg: +(w.base - w.min).toFixed(2),
-      min_epoch_ms: +(performance.timeOrigin + w.minT).toFixed(1), latency_ms: Math.round(w.minT - w.t0) }));
+  return w.deep && cva - w.min >= NOD.backFraction * (w.base - w.min);
+}
+function startNodWatch(which) {
+  const t = performance.now();
+  return new Promise(res => { S.nodWatch = { which, t0: t, recT0: S.rec.t0, base: nodBase(S.rec.rows, t, S.rec.t0), min: Infinity, minT: null, deep: false, res }; });
+}
+function watchNod(t, cva) {
+  const w = S.nodWatch; if (!w) return;
+  if (nodStep(w, t, cva)) {
+    S.rec.events.push(ev('nod_detected', { which: w.which, base_cva: +w.base.toFixed(2), min_cva: +w.min.toFixed(2), depth_deg: +(w.base - w.min).toFixed(2), back_deg: +(cva - w.min).toFixed(2),
+      min_epoch_ms: +(performance.timeOrigin + w.minT).toFixed(1), min_wall_ms: wallMs(w.minT), latency_ms: Math.round(w.minT - w.t0) }));
     S.nodWatch = null; beep(1400, 80); w.res(true);
   }
 }
 function nodOrTimeout(which, max) {
   const p = startNodWatch(which);
-  return Promise.race([p, sleep(max).then(() => false)]).then(ok => { if (!ok && S.nodWatch) { S.rec?.events.push(ev('nod_timeout', { which })); S.nodWatch = null; } return ok; });
+  return Promise.race([p, sleep(max).then(() => false)]).then(ok => { if (!ok && S.nodWatch) { const w = S.nodWatch; S.rec?.events.push(ev('nod_timeout', { which, base_cva: w.base === null ? null : +w.base.toFixed(2), min_cva: Number.isFinite(w.min) ? +w.min.toFixed(2) : null })); S.nodWatch = null; } return ok; });
 }
 
 // ---------------------------------------------------------------- 映像の保存（任意）
@@ -519,7 +532,10 @@ function redrawSnap() { S.img = S.snapImg; const ang = angles(); draw(ang); read
 function selectTarget(t) { S.target = t; document.querySelectorAll('[data-target]').forEach(b => b.classList.toggle('sel', b.dataset.target === t)); hint(); }
 function hint() { $('tapHint').textContent = S.target === 'level' ? '水色の点線（センサーの水平）がずれているときだけ使います。壁の水平なテープなど、本当に水平な線の上を2点タップしてください。' : `${NAMES[S.target]}のマーカーをタップしてください。`; }
 
-function ev(type, extra = {}) { const t = performance.now(); return { type, epoch_ms: +(performance.timeOrigin + t).toFixed(1), perf_ms: +t.toFixed(1), label: S.rowLabel, ...extra }; }
+function ev(type, extra = {}) { const t = performance.now(); return { type, epoch_ms: +(performance.timeOrigin + t).toFixed(1), perf_ms: +t.toFixed(1), wall_ms: wallMs(t), label: S.rowLabel, ...extra }; }
+// 0.5.1：wall_ms = 記録開始時の Date.now() ＋（perf − 記録開始時の perf）。Android で画面がスリープしていると
+// performance.now() が止まり、timeOrigin + perf（epoch_ms）が実際の時刻より遅れる（dual_test3 で約13分）。解析では wall_ms を使う
+function wallMs(t) { const c = S.rec?.clock; return c ? +(c.dateNowMs + (t - c.perfNowMs)).toFixed(1) : null; }
 function setLabel(l, log = true) {   // 手動のラベル
   S.label = l; if (S.stage === 'manual') S.rowLabel = l;
   document.querySelectorAll('[data-label]').forEach(x => x.classList.toggle('sel', x.dataset.label === l));
@@ -561,7 +577,7 @@ function applyCondition() { const pr = PRESET_FOR[$('condition').value]; if (pr)
 
 // ---------------------------------------------------------------- 終了時の品質判定
 function judgeQuality(last) {
-  const reasons = [], rates = {};
+  const reasons = [], warnings = [], rates = {};
   for (const n of QUALITY.requiredMarkers) {
     const d = last.detection[n]; rates[n] = d ? d.rate : null;
     if (!d || d.rate === null) reasons.push(`${NAMES[n]}のマーカーが設定されていません`);
@@ -569,15 +585,17 @@ function judgeQuality(last) {
   }
   const nods = last.events.filter(e => e.type === 'nod_detected').length;
   if (last.protocol) {
-    if (nods < QUALITY.nodsRequired) reasons.push(`うなずきの検出が ${nods}/${QUALITY.nodsRequired}（時刻合わせができない可能性があります）`);
+    if (nods < QUALITY.nodsMinimum) reasons.push(`うなずきの検出が ${nods}/${QUALITY.nodsRequired}（時刻合わせができない可能性があります）`);
+    else if (nods < QUALITY.nodsRequired) { const miss = ['start', 'end'].filter(w => !last.events.some(e => e.type === 'nod_detected' && e.which === w)).map(w => w === 'start' ? '最初' : '最後'); warnings.push(`うなずきの検出が ${nods}/${QUALITY.nodsRequired}（${miss.join('・')}を検出できませんでした。もう一方で時刻を合わせられます）`); }
     if (!last.events.some(e => e.type === 'sync_cue' && e.which === 'end')) reasons.push('案内が最後まで進んでいません（途中で停止しました）');
   }
   for (const [n, d] of Object.entries(last.detection)) if (d.colorClash > QUALITY.maxColorClash) reasons.push(`${NAMES[n]}の色が肌・服・背景にもあります（マーカーの${Math.round(d.colorClash * 100)}%）`);
-  return { ok: !reasons.length, verdict: reasons.length ? 'やり直し推奨' : 'OK', reasons, detectionRates: rates, nodsDetected: nods, rules: QUALITY };
+  return { ok: !reasons.length, verdict: reasons.length ? 'やり直し推奨' : warnings.length ? '注意' : 'OK', reasons, warnings, detectionRates: rates, nodsDetected: nods, rules: QUALITY };
 }
 function showQuality(q) {
-  const box = $('qualityBox'); box.hidden = false; box.className = 'quality ' + (q.ok ? 'ok' : 'ng');
-  box.innerHTML = `<strong>${q.verdict}</strong>${q.ok ? '<span>検出率・うなずき・色の判定は、すべて基準を満たしています。</span>' : '<ul>' + q.reasons.map(r => `<li>${r}</li>`).join('') + '</ul><span>この回だけやり直してください。</span>'}`;
+  const box = $('qualityBox'); box.hidden = false; box.className = 'quality ' + (q.ok ? (q.warnings.length ? 'warn' : 'ok') : 'ng');
+  const list = a => a.length ? '<ul>' + a.map(r => `<li>${r}</li>`).join('') + '</ul>' : '';
+  box.innerHTML = `<strong>${q.verdict}</strong>${q.ok ? (q.warnings.length ? list(q.warnings) + '<span>やり直さなくてかまいません。</span>' : '<span>検出率・うなずき・色の判定は、すべて基準を満たしています。</span>') : list(q.reasons) + list(q.warnings) + '<span>この回だけやり直してください。</span>'}`;
 }
 
 function startRec() {
@@ -667,7 +685,7 @@ function meta() {
     markers: Object.fromEntries(Object.entries(S.markers).map(([n, m]) => [n, { color: m.color, snapshotPosition: m.snapPos, snapshotArea: m.snapArea, colorClash: m.clash }])),
     detection: S.last.detection,
     columns: { label: '自動：準備・うなずき・案内中・移行中・各姿勢／手動：押したラベル', target_label: 'その区間で目標にしている姿勢', stage: 'prep | nod | guide | transition | hold | manual', step: '姿勢の番号（0から。基準は何度も出てくるので step で区別する）' },
-    units: { epoch_ms: 'Unix時刻[ms] = performance.timeOrigin + perf_ms（posture-lab の meta.timeOrigin + t と同じ基準）', coords: '映像の画素（左上が原点、左右反転なし）', angles: '度' },
+    units: { epoch_ms: 'Unix時刻[ms] = performance.timeOrigin + perf_ms（posture-lab の meta.timeOrigin + t と同じ基準）', wall_ms: 'Unix時刻[ms] = clock.dateNowMs + (perf_ms − clock.perfNowMs)。端末のスリープで performance.now が止まっても、記録開始時の Date.now に合う。解析ではこちらを使う', coords: '映像の画素（左上が原点、左右反転なし）', angles: '度' },
     definitions: { cva: 'C7を通る水平線と C7→耳珠 のなす角（画像の傾きを補正）', watanabe: '肩峰→耳珠 と鉛直線のなす角（前傾が正）' },
   };
 }

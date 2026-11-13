@@ -36,3 +36,4 @@ label.check{display:flex;align-items:center;gap:8px;font-size:12px}label.check i
 .quality.ok{background:#e3f6ef;color:#0f5c4a;border:2px solid #49b892}
 .quality.ng{background:#fff0e4;color:#8a3d12;border:2px solid #e28a4d}
 .quality ul{margin:6px 0;padding-left:20px}
+.quality.warn{background:#fff7e3;color:#735715;border:2px solid #d5bb80}
