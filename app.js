@@ -4,9 +4,10 @@
 // 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
 // 0.4.0：姿勢の間に基準を挟む、posture-labとの同時計測用の案内、色の判定を厳しく（マーカー自身の色の幅から決める）、大きさの急変を除外、色の重なりの警告
 // 0.5.0：本実験用。被験者・条件・回の入力とファイル名、「スタンド固定」の案内、猫背、時計の組、画面の消灯防止、終了時の品質判定
+// 0.6.0：手順に「自然」「悪い姿勢」「読書」を追加、声かけの変更（guidanceVersion 20261115）、途中の基準で戻れているかを音声で知らせる
 // 0.5.1：うなずきの検出を緩める（10°下がって深さの半分戻る、12秒）、1/2は「注意」、各行に wall_ms、固定の「うつむく」の声かけ
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.5.1';
+const VERSION = '0.6.0';
 // 終了時の品質判定（本実験の「事前に決める除外基準」に合わせる）。満たさなければ「やり直し推奨」
 const QUALITY = {
   minDetectionRate: 0.95,       // 耳珠・C7の検出率がこれ未満 → その回を除外
@@ -21,12 +22,31 @@ const video = $('video'), snap = $('snap'), overlay = $('overlay'), octx = overl
 const proc = document.createElement('canvas'), pctx = proc.getContext('2d', { willReadFrequently: true });
 const comp = document.createElement('canvas'), cctx = comp.getContext('2d');   // 映像の保存用（計測結果を重ねる）
 const NAMES = { tragus: '耳珠', c7: 'C7', acromion: '肩峰' };
-// 案内の手順。姿勢と姿勢の間には必ず「基準」（頭を楽な位置に戻す）を挟む
-const BACK = '頭を楽な位置に戻して、正面を見てください';
-// 本実験の基準の声かけは、条件ごとに毎回同じ文言にする（基準姿勢を強制する仕組みは入れない）
-const BASE_STAND = '画面を楽に正面から見てください';
-const BASE_HAND = 'スマホを目の高さに持って、楽に正面を見てください';
-const SLOUCH = '背中を丸めて、肩を前に出してください。腰から前に倒れないでください';   // 猫背。前かがみ（腰から倒す）と区別する
+// 案内の手順。姿勢と姿勢の間には必ず「基準」を挟む。各要素は [ラベル, 声かけ, 決めた秒数（省略時は「1姿勢の時間」）]
+const BACK = '頭を楽な位置に戻して、正面を見てください';   // basic（CVAカメラだけ）で使う
+// 0.6.0：声かけの版。基準の意味が「楽な姿勢」から「姿勢を正す」に変わったので、解析で区別するため meta.protocol に入れる
+const GUIDANCE_VERSION = '20261115';
+// 区間の長さ（秒）。自然・悪い姿勢・読書は CVA の安定を待たず、この秒数で次へ進む
+const DURATION_SEC = { firstBase: 10, natural: 30, bad: 15, reading: 120 };
+const SAY = {
+  stand: { base0: '姿勢を正して、画面を見てください', base: '基準の姿勢に戻ってください', slouch: '猫背になってください' },
+  hand: { base0: '姿勢を正して、スマホを目の高さに持ってください', base: '基準の姿勢に戻って、スマホを目の高さに持ってください', slouch: 'スマホを胸の高さに下げて、猫背になってください' },
+  natural: '普段スマホを見るときの、楽な姿勢になってください',
+  bad: '画面を見たまま、自分にとって一番悪いと思う姿勢になってください',
+  reading: '画面の文章を読んでください。姿勢は気にしなくて大丈夫です',
+};
+// 本実験の手順（固定）：基準(10秒) → 自然(30秒) → 基準 → うつむく → 基準 → 顎 → 基準 → 猫背 → 基準 → 目線 → 基準 → 悪い姿勢(15秒) → 基準 → 読書(120秒) → 基準 → 自然(30秒)
+// 手持ちは「目線だけ下げる → 基準」の後に「端末だけ動かす → 基準」が入る
+function mainProtocol(c, postures) {
+  const B = ['基準', SAY[c].base];
+  return [
+    ['基準', SAY[c].base0, DURATION_SEC.firstBase], ['自然', SAY.natural, DURATION_SEC.natural], B,
+    ...postures.flatMap(p => [p, B]),
+    ['悪い姿勢', SAY.bad, DURATION_SEC.bad], B,
+    ['読書', SAY.reading, DURATION_SEC.reading], B,
+    ['自然', SAY.natural, DURATION_SEC.natural],
+  ];
+}
 const PRESETS = {
   basic: [
     ['基準', '楽な姿勢で、正面を見てください'],
@@ -34,24 +54,22 @@ const PRESETS = {
     ['顎を突き出す', '顎を前に突き出してください'], ['基準', BACK],
     ['目線だけ下げる', '頭は楽な位置のまま、目線だけを下げてください'], ['基準', BACK],
   ],
-  stand: [   // 本実験の主条件：posture-labのスマホをスタンドに固定して同時に計測する（9区間）
-    ['基準', BASE_STAND],
-    ['うつむく', '画面を見たまま、首を曲げて、あごを引くようにうつむいてください'], ['基準', BASE_STAND],
-    ['顎を突き出す', '画面を見たまま、顎を前に突き出してください'], ['基準', BASE_STAND],
-    ['猫背', '画面を見たまま、' + SLOUCH], ['基準', BASE_STAND],
-    ['目線だけ下げる', '頭は動かさず、目線だけを下げてください'], ['基準', BASE_STAND],
-  ],
-  dual: [   // posture-labのスマホを手に持って同時に計測するとき（本実験の手持ちの回、11区間）
-    ['基準', BASE_HAND],
-    ['うつむく', 'スマホを胸の高さに下げて、うつむいて画面を見てください'], ['基準', BASE_HAND],
-    ['顎を突き出す', 'スマホを胸の高さに下げて、顎を前に突き出して画面を見てください'], ['基準', BASE_HAND],
-    ['猫背', 'スマホを胸の高さに下げて、画面を見たまま、' + SLOUCH], ['基準', BASE_HAND],
-    ['目線だけ下げる', 'スマホを胸の高さに下げて、頭は動かさず、目線だけで画面を見てください'], ['基準', BASE_HAND],
-    ['端末だけ動かす', '頭は動かさず、スマホだけをゆっくり上下に動かしてください'], ['基準', BASE_HAND],
-  ],
+  stand: mainProtocol('stand', [   // 本実験の主条件：posture-labのスマホをスタンドに固定して同時に計測する（16区間）
+    ['うつむく', '画面を見たまま、あごを引くようにうつむいてください'],
+    ['顎を突き出す', '画面を見たまま、顎を前に突き出してください'],
+    ['猫背', SAY.stand.slouch],
+    ['目線だけ下げる', '頭は動かさず、目線だけを下げてください'],
+  ]),
+  dual: mainProtocol('hand', [     // posture-labのスマホを手に持って同時に計測するとき（本実験の手持ちの回、18区間）
+    ['うつむく', 'スマホを胸の高さに下げて、うつむいて画面を見てください'],
+    ['顎を突き出す', 'スマホを胸の高さに下げて、顎を前に突き出して画面を見てください'],
+    ['猫背', SAY.hand.slouch],
+    ['目線だけ下げる', 'スマホを胸の高さに下げて、頭は動かさず、目線だけで画面を見てください'],
+    ['端末だけ動かす', '頭は動かさず、スマホだけをゆっくり上下に動かしてください'],
+  ]),
 };
 const PRESET_FOR = { fixed: 'stand', hand: 'dual' };   // 条件から案内の内容を選ぶ（練習は選んだまま）
-let PROTOCOL = PRESETS.basic.map(x => x[0]), SAYS = PRESETS.basic.map(x => x[1]);
+let PROTOCOL = PRESETS.basic.map(x => x[0]), SAYS = PRESETS.basic.map(x => x[1]), SECS = PRESETS.basic.map(() => null);
 // うなずき（0.5.1）：基準＝合図の直前1秒のCVAの中央値（記録開始から1秒以内のフレームは使わない）。
 // 基準から drop 度以上下がり、その最小値から深さ（基準−最小値）の backFraction 以上戻ったら検出。待ち時間は最初・最後とも12秒
 const NOD = { drop: 10, backFraction: 0.5, baseWindowMs: 1000, skipFirstMs: 1000, startMax: 12000, endMax: 12000, after: 1500, back: null };   // back は 0.4.x の「基準から3°以内に戻る」（使わない）
@@ -607,8 +625,8 @@ function startRec() {
   const auto = $('protocol').value === 'auto', hold = Math.max(3, +$('holdSec').value || 10) * 1000, trans = Math.max(0, +$('transSec').value || 0) * 1000, sec = +$('recTimer').value;
   if (sec) say('記録を始めます。写真と同じ位置で、正面を向いてください');
   countdown(sec, () => {
-    const preset = $('preset').value; PROTOCOL = PRESETS[preset].map(x => x[0]); SAYS = PRESETS[preset].map(x => x[1]);
-    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null } : null };
+    const preset = $('preset').value; PROTOCOL = PRESETS[preset].map(x => x[0]); SAYS = PRESETS[preset].map(x => x[1]); SECS = PRESETS[preset].map(x => x[2] ?? null);
+    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, guidanceVersion: preset === 'basic' ? null : GUIDANCE_VERSION, fixedSec: SECS, durationSec: DURATION_SEC, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null } : null };
     S.step = -1;
     if (auto) { S.stage = 'prep'; S.rowLabel = '準備'; } else { S.stage = 'manual'; S.rowLabel = S.label; }
     S.rec.subject = subj;
@@ -646,7 +664,8 @@ async function runProtocol(hold, trans) {
     setStage('guide', '案内中', i); beep(880, 150); await sayWait(SAYS[i]); if (!alive()) return;
     if (trans) { setStage('transition', '移行中', i); await sleep(trans); if (!alive()) return; }
     setStage('hold', l, i);
-    if (l === '基準' && i > 0 && $('quickBase').checked) await holdUntilStable(i, hold); else await sleep(hold);
+    if (SECS[i] !== null) await sleep(SECS[i] * 1000);   // 決めた秒数（最初の基準・自然・悪い姿勢・読書）
+    else if (l === '基準' && i > 0 && $('quickBase').checked) await holdUntilStable(i, hold); else await sleep(hold);
     if (!alive()) return;
   }
   setStage('nod', 'うなずき', PROTOCOL.length); beep(1000, 200); S.rec.events.push(ev('sync_cue', { which: 'end' })); say('最後に、素早く1回うなずいてください');
