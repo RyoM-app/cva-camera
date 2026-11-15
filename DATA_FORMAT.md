@@ -123,3 +123,7 @@ dual_test3 の手持ち（hand3、Android）で、`epoch_ms`（= `timeOrigin` �
 
 - `basic` の案内で、0.4.1 と 0.5.0 の区間ごとの CVA の中央値が同じ（真値50°の映像で、どの区間も 50.14°）。`rows` の列も同じ
 - `stand`・`dual` の区間の並びと step が上の表どおり
+
+
+## `free`（0.6.1、posture-vection-lab と同時に計測する自由記録）
+`meta.protocol.preset = free`。区間は2つ：`基準`（step 0、10秒）→ `ベクション実験`（step 1、実験者が「終了の合図へ」を押すまで。最長30分）。前後にうなずき（`stage = nod`）が入る。押した時刻は `free_end` イベント（`why`：`operator`／`timeout_30min`）。ベクションの提示が終わって posture-vection-lab が「終了：うなずきの合図を待っています」を出したら、実験者が押す。声のうなずきの合図は CVAカメラが出し、posture-vection-lab は同じうなずきを頭部傾きで検出する（音声は「なし」にしておく）。

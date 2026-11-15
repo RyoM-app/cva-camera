@@ -7,7 +7,7 @@
 // 0.6.0：手順に「自然」「悪い姿勢」「読書」を追加、声かけの変更（guidanceVersion 20261115）、途中の基準で戻れているかを音声で知らせる
 // 0.5.1：うなずきの検出を緩める（10°下がって深さの半分戻る、12秒）、1/2は「注意」、各行に wall_ms、固定の「うつむく」の声かけ
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.6.0';
+const VERSION = '0.6.1';
 // 終了時の品質判定（本実験の「事前に決める除外基準」に合わせる）。満たさなければ「やり直し推奨」
 const QUALITY = {
   minDetectionRate: 0.95,       // 耳珠・C7の検出率がこれ未満 → その回を除外
@@ -37,6 +37,7 @@ const SAY = {
   natural: '普段スマホを見るときの、楽な姿勢になってください',
   bad: '画面を見たまま、自分にとって一番悪いと思う姿勢になってください',
   reading: '画面の文章を読んでください。姿勢は気にしなくて大丈夫です',
+  free: '姿勢を正して、画面を見てください。そのあとは、画面の指示に従ってください',
 };
 // 本実験の手順（固定）：基準(10秒) → 自然(30秒) → 基準 → うつむく → 基準 → 顎 → 基準 → 猫背 → 基準 → 目線 → 基準 → 悪い姿勢(15秒) → 基準 → 読書(120秒) → 基準 → 自然(30秒)
 // 手持ちは「目線だけ下げる → 基準」の後に「端末だけ動かす → 基準」が入る
@@ -71,6 +72,8 @@ const PRESETS = {
     ['端末だけ動かす', '頭は動かさず、スマホだけをゆっくり上下に動かしてください'],
   ]),
 };
+// posture-vection-lab と同時に計測するとき：基準(10秒) → 実験者が「終了の合図へ」を押すまで自由に記録 → うなずき
+PRESETS.free = [['基準', SAY.free, DURATION_SEC.firstBase], ['ベクション実験', '画面の文章を読んでください。姿勢は自由です', 'manual']];
 const PRESET_FOR = { fixed: 'stand', hand: 'dual' };   // 条件から案内の内容を選ぶ（練習は選んだまま）
 let PROTOCOL = PRESETS.basic.map(x => x[0]), SAYS = PRESETS.basic.map(x => x[1]), SECS = PRESETS.basic.map(() => null);
 // うなずき（0.5.1）：基準＝合図の直前1秒のCVAの中央値（記録開始から1秒以内のフレームは使わない）。
@@ -679,6 +682,14 @@ async function holdUntilStable(step, maxMs) {
     }
   }
 }
+function waitFreeEnd() {
+  const btn = $('freeEndBtn');
+  return new Promise(res => {
+    const done = why => { btn.hidden = true; btn.onclick = null; S.rec?.events.push(ev('free_end', { why })); res(); };
+    btn.hidden = false; btn.onclick = () => done('operator');
+    S.timers.push(setTimeout(() => done('timeout_30min'), 30 * 60 * 1000));
+  });
+}
 // 自動の案内：準備 → うなずき（検出まで）→［案内中 → 移行中 → 姿勢］×5 → うなずき（検出まで）→ 終了
 async function runProtocol(hold, trans) {
   const tok = S.rec, alive = () => S.rec === tok;
@@ -691,7 +702,8 @@ async function runProtocol(hold, trans) {
     setStage('guide', '案内中', i); beep(880, 150); await sayWait(SAYS[i]); if (!alive()) return;
     if (trans) { setStage('transition', '移行中', i); await sleep(trans); if (!alive()) return; }
     setStage('hold', l, i);
-    if (SECS[i] !== null) await sleep(SECS[i] * 1000);   // 決めた秒数（最初の基準・自然・悪い姿勢・読書）
+    if (SECS[i] === 'manual') await waitFreeEnd();   // 実験者が「終了の合図へ」を押すまで（free）。最長30分
+    else if (SECS[i] !== null) await sleep(SECS[i] * 1000);   // 決めた秒数（最初の基準・自然・悪い姿勢・読書）
     else if (l === '基準' && i > 0 && $('quickBase').checked) await (S.rec.protocol.guidanceVersion && S.rec.baseRef !== null ? holdBaseFeedback(i) : holdUntilStable(i, hold));
     else await sleep(hold);
     if (!alive()) return;
@@ -703,7 +715,7 @@ async function runProtocol(hold, trans) {
   stopRec(ok ? '最後のうなずきを検出しました。自動の案内が終わりました。保存してください。' : '最後のうなずきを検出できないまま、待ち時間が終わりました。保存してください。');
 }
 function stopRec(msg) {
-  S.timers.forEach(id => { clearTimeout(id); clearInterval(id); }); S.timers = []; $('countdown').hidden = true; S.nodWatch = null;
+  S.timers.forEach(id => { clearTimeout(id); clearInterval(id); }); S.timers = []; $('countdown').hidden = true; S.nodWatch = null; $('freeEndBtn').hidden = true;
   if (S.rec) {
     S.rec.events.push(ev('record_stop')); S.rec.stoppedAt = new Date().toISOString(); S.last = S.rec; S.rec = null;
     stopVideo();
