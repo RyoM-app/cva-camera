@@ -93,7 +93,7 @@
         <label>案内の内容<select id="preset"><option value="stand">スタンド固定（posture-labと同時、本実験の主条件、16区間）</option><option value="dual">posture-labと同時（スマホを手に持つ、18区間）</option><option value="basic" selected>CVAカメラだけ（7区間）</option></select></label>
         <label>1姿勢の時間（秒）<input type="number" id="holdSec" min="3" max="60" value="10"></label>
         <label>移行の時間（秒）<input type="number" id="transSec" min="0" max="15" value="3"></label>
-        <label class="check"><input type="checkbox" id="quickBase" checked> 途中の基準は、安定したら次へ（5秒〜1姿勢の時間）</label>
+        <label class="check"><input type="checkbox" id="quickBase" checked> 途中の基準は、戻れたら次へ（本実験の手順：最初の基準±4°に2秒入ったら「ピッ」、5秒で声かけ、最長12秒／CVAカメラだけ：安定したら）</label>
         <label>映像の保存<select id="vidMode"><option value="none" selected>しない（データのみ）</option><option value="overlay">計測結果を重ねた映像（発表用）</option><option value="raw">元の映像</option></select></label>
       </div>
       <p class="note" id="protocolNote">自動：うなずき → 基準 → うつむく → 基準 → 顎を突き出す → 基準 → 目線だけ下げる → 基準 → うなずき。姿勢の間には必ず基準（頭を楽な位置に戻す）が入ります。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。</p>

@@ -11,6 +11,10 @@
 | `meta.protocol` | `guidanceVersion` | 声かけの版。本実験の手順（`stand`・`dual`）では `"20261115"`、`basic` では `null`。**0.6.0 から基準の意味が「楽な姿勢」→「姿勢を正す」に変わった**ので、これで区別する |
 | `meta.protocol` | `fixedSec` | 区間ごとの決めた秒数（`steps` と同じ長さ。`null` は「1姿勢の時間」か、途中の基準の判定で決まる） |
 | `meta.protocol` | `durationSec` | `{firstBase: 10, natural: 30, bad: 15, reading: 120}` |
+| `meta.protocol` | `baseFeedback` | 途中の基準の判定の条件 `{tolDeg: 4, inMs: 2000, promptMs: 5000, maxMs: 12000, prompt}`。使わないとき（`basic`、チェックを外したとき）は `null` |
+| `events` | `base_reference` | 最初の基準（step 0）が終わったとき：`cva_deg`（step 0 の hold の CVA の中央値。途中の基準の正解）、`frames` |
+| `events` | `base_feedback` | 途中の基準が終わったとき：`step`、`result`（`in_range`＝±4°に2秒入った／`timeout`＝12秒）、`prompted`（「もう少し、姿勢を正してください」と言ったか）、`prompt_ms`（言った時刻、区間の始まりから）、`ref_cva`、`cva_deg`（最後の2秒の中央値）、`diff_deg`（＝`cva_deg − ref_cva`）、`ms`（区間の長さ）、`tol_deg` |
+| `events` | `hold_end` の `reason` | 新しい値 `base_in_range`（途中の基準で戻れた）。時間切れは今までどおり `timeout` |
 
 ### 0.6.0 の区間（`stage = hold` の `step`）
 

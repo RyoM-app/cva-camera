@@ -28,6 +28,9 @@ const BACK = '頭を楽な位置に戻して、正面を見てください';   /
 const GUIDANCE_VERSION = '20261115';
 // 区間の長さ（秒）。自然・悪い姿勢・読書は CVA の安定を待たず、この秒数で次へ進む
 const DURATION_SEC = { firstBase: 10, natural: 30, bad: 15, reading: 120 };
+// 途中の基準で、最初の基準に戻れているかを音声で知らせる（本実験の手順だけ。ほかの区間では知らせない）
+// CVA が最初の基準の中央値 ±tolDeg に inMs 続いたら「ピッ」で次へ。promptMs たっても入らなければ1回だけ声をかける。最長 maxMs
+const BASE_FB = { tolDeg: 4, inMs: 2000, promptMs: 5000, maxMs: 12000, prompt: 'もう少し、姿勢を正してください' };
 const SAY = {
   stand: { base0: '姿勢を正して、画面を見てください', base: '基準の姿勢に戻ってください', slouch: '猫背になってください' },
   hand: { base0: '姿勢を正して、スマホを目の高さに持ってください', base: '基準の姿勢に戻って、スマホを目の高さに持ってください', slouch: 'スマホを胸の高さに下げて、猫背になってください' },
@@ -626,7 +629,7 @@ function startRec() {
   if (sec) say('記録を始めます。写真と同じ位置で、正面を向いてください');
   countdown(sec, () => {
     const preset = $('preset').value; PROTOCOL = PRESETS[preset].map(x => x[0]); SAYS = PRESETS[preset].map(x => x[1]); SECS = PRESETS[preset].map(x => x[2] ?? null);
-    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, guidanceVersion: preset === 'basic' ? null : GUIDANCE_VERSION, fixedSec: SECS, durationSec: DURATION_SEC, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null } : null };
+    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, guidanceVersion: preset === 'basic' ? null : GUIDANCE_VERSION, fixedSec: SECS, durationSec: DURATION_SEC, baseFeedback: preset === 'basic' || !$('quickBase').checked ? null : BASE_FB, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null } : null };
     S.step = -1;
     if (auto) { S.stage = 'prep'; S.rowLabel = '準備'; } else { S.stage = 'manual'; S.rowLabel = S.label; }
     S.rec.subject = subj;
@@ -639,6 +642,30 @@ function startRec() {
 }
 // 途中の基準：CVAが3秒間ほぼ一定（変動2°以内）になったら次へ。最短5秒、最長は1姿勢の時間。
 // 「最初の基準と同じ値に戻ったか」では判定しない（再現性の評価が甘くなるため）。
+const median = a => { const v = a.slice().sort((x, y) => x - y); return v.length ? v[v.length >> 1] : null; };
+// 最初の基準（step 0）の CVA の中央値を、途中の基準の正解にする
+function setBaseReference() {
+  const v = S.rec.rows.filter(r => r.stage === 'hold' && r.step === 0 && r.valid).map(r => r.cva_deg);
+  S.rec.baseRef = v.length >= 10 ? median(v) : null;
+  S.rec.events.push(ev('base_reference', { step: 0, cva_deg: S.rec.baseRef === null ? null : +S.rec.baseRef.toFixed(2), frames: v.length }));
+}
+async function holdBaseFeedback(step) {
+  const t0 = performance.now(), ref = S.rec.baseRef;
+  let prompted = false, promptMs = null;
+  const recent = t => S.rec.rows.filter(r => r.perf_ms >= Math.max(t0, t - BASE_FB.inMs));
+  const finish = (result, el, v) => {
+    const m = median(v), r = S.rec.baseRef ?? ref;
+    S.rec.events.push(ev('base_feedback', { step, result, prompted, prompt_ms: promptMs, ref_cva: +r.toFixed(2), cva_deg: m === null ? null : +m.toFixed(2), diff_deg: m === null ? null : +(m - r).toFixed(2), ms: Math.round(el), tol_deg: BASE_FB.tolDeg }));
+    S.rec.events.push(ev('hold_end', { step, reason: result === 'in_range' ? 'base_in_range' : 'timeout', ms: Math.round(el) }));
+  };
+  for (;;) {
+    await sleep(100); if (!S.rec) return;
+    const t = performance.now(), el = t - t0, r = S.rec.baseRef ?? ref, w = recent(t), v = w.filter(x => x.valid).map(x => x.cva_deg);
+    if (el >= BASE_FB.inMs && v.length >= 5 && v.length >= 0.8 * w.length && v.every(c => Math.abs(c - r) <= BASE_FB.tolDeg)) { beep(1500, 70); finish('in_range', el, v); return; }
+    if (el >= BASE_FB.maxMs) { finish('timeout', el, v); return; }
+    if (!prompted && el >= BASE_FB.promptMs) { prompted = true; promptMs = Math.round(el); say(BASE_FB.prompt); }
+  }
+}
 async function holdUntilStable(step, maxMs) {
   const t0 = performance.now(), minMs = Math.min(5000, maxMs), win = 3000, tol = 2;
   for (;;) {
@@ -665,8 +692,10 @@ async function runProtocol(hold, trans) {
     if (trans) { setStage('transition', '移行中', i); await sleep(trans); if (!alive()) return; }
     setStage('hold', l, i);
     if (SECS[i] !== null) await sleep(SECS[i] * 1000);   // 決めた秒数（最初の基準・自然・悪い姿勢・読書）
-    else if (l === '基準' && i > 0 && $('quickBase').checked) await holdUntilStable(i, hold); else await sleep(hold);
+    else if (l === '基準' && i > 0 && $('quickBase').checked) await (S.rec.protocol.guidanceVersion && S.rec.baseRef !== null ? holdBaseFeedback(i) : holdUntilStable(i, hold));
+    else await sleep(hold);
     if (!alive()) return;
+    if (i === 0) setBaseReference();
   }
   setStage('nod', 'うなずき', PROTOCOL.length); beep(1000, 200); S.rec.events.push(ev('sync_cue', { which: 'end' })); say('最後に、素早く1回うなずいてください');
   const ok = await nodOrTimeout('end', NOD.endMax); if (!alive()) return;
