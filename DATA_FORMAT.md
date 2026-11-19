@@ -15,6 +15,11 @@
 | `events` | `base_feedback` | `result` が `in_range`／`not_in_range`（`timeout` は使わない）。`fixed_length: true`、`in_range_ms`（移行の始まりから「ピッ」まで）。`ms` は移行＋区間の長さ（9000） |
 | `events` | `hold_end` | 進行表の基準では `reason = fixed` |
 
+| `events` | `sync_tone_start` | 開始の音の**鳴り始め**：`perf_ms`・`epoch_ms`・`wall_ms`（鳴り始めの時刻。進行表の t = 0）、`pattern`（[1500, 2500, 1500]）、`duration_s`、`ctx_time`、`output_latency_ms`・`base_latency_ms`（端末が報告する出力の遅れ。`null` のこともある）、`audio_state`、`called_perf_ms` |
+| `events` | `sync_tone_end` | 終了の音の鳴り始め（t0 ＋ `timetable.endToneAt`）。同じキー、`pattern` は [2500, 1500, 2500] |
+
+進行表のときは `timetable_start.t0_perf_ms` ＝ `sync_tone_start.perf_ms`。posture-lab の `meta.sync.t0` はこの音を聞いた鳴り始めなので、2台の時刻は「`sync_tone_start` どうし」で大まかに合い、うなずきで確かめる。
+
 区間の並びと step（0.7.0）：`stand` は step 0 基準(10)・1 自然・2 基準・3 うつむく・4 基準・5 顎・6 基準・7 猫背・8 基準・9 目線・10 基準・11 悪い姿勢・12 基準・13 読書(60)・14 基準・15 自然・16 基準、うなずきは step −1 と 17。`dual` は 11 端末だけ動かす が入り、うなずきは −1 と 19。**読書は 120 → 60秒、最後の自然のあとに基準が増えた**ので、0.6.x と step の番号がずれる（label で判断すること）。
 
 ## 0.6.0 で増えたもの・変わったもの

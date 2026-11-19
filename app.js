@@ -4,6 +4,7 @@
 // 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
 // 0.4.0：姿勢の間に基準を挟む、posture-labとの同時計測用の案内、色の判定を厳しく（マーカー自身の色の幅から決める）、大きさの急変を除外、色の重なりの警告
 // 0.5.0：本実験用。被験者・条件・回の入力とファイル名、「スタンド固定」の案内、猫背、時計の組、画面の消灯防止、終了時の品質判定
+// 0.7.0：開始・終了の音（posture-lab がマイクで聞いて自動で始まる）
 // 0.7.0：本実験の手順（stand・dual）を進行表（protocol.js、posture-lab と同じファイル）で固定の長さに。基準は6秒、最後のうなずきの前に基準、うなずきの声かけ
 // 0.6.0：手順に「自然」「悪い姿勢」「読書」を追加、声かけの変更（guidanceVersion 20261115）、途中の基準で戻れているかを音声で知らせる
 // 0.5.1：うなずきの検出を緩める（10°下がって深さの半分戻る、12秒）、1/2は「注意」、各行に wall_ms、固定の「うつむく」の声かけ
@@ -608,6 +609,7 @@ function startRec() {
   const subj = subjectForm(), bad = checkSubject(subj);
   if (bad) { setStatus(bad, true); return; }
   rememberSubject(subj); keepAwake();
+  try { audio ??= new (window.AudioContext || window.webkitAudioContext)(); audio.resume(); } catch (e) {}   // 開始の音のため、押した時点で音を使えるようにする
   for (const mk of Object.values(S.markers)) { mk.lost = 0; mk.found = 0; mk.frames = 0; mk.aRef = mk.snapArea; mk.prev = [mk.snapPos[0] * S.k, mk.snapPos[1] * S.k]; }
   setPhase('countdown');
   const auto = $('protocol').value === 'auto', hold = Math.max(3, +$('holdSec').value || 10) * 1000, trans = Math.max(0, +$('transSec').value || 0) * 1000, sec = +$('recTimer').value;
@@ -697,9 +699,28 @@ function watchBase(step, fromT, endT) {
   };
   return w;
 }
+// 開始・終了の音（protocol.js の TONES）を、音の時計（AudioContext）で決めた時刻に鳴らす。鳴り始めの時刻（perf）を返す
+function playTone(kind, atPerf = null) {
+  audio ??= new (window.AudioContext || window.webkitAudioContext)();
+  if (audio.state === 'suspended') audio.resume();
+  const seq = PP.TONES[kind], now = performance.now(), lead = atPerf === null ? 0.06 : Math.max(0.02, (atPerf - now) / 1000);
+  const startAt = audio.currentTime + lead; let t = startAt;
+  for (const [f, d] of seq) {
+    const o = audio.createOscillator(), g = audio.createGain(); o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(audio.destination);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(PP.TONES.gain, t + 0.005); g.gain.setValueAtTime(PP.TONES.gain, t + d - 0.005); g.gain.linearRampToValueAtTime(0, t + d);
+    o.start(t); o.stop(t + d + 0.01); t += d;
+  }
+  const perf = now + lead * 1000;
+  return { perf, info: { pattern: seq.map(x => x[0]), duration_s: +seq.reduce((a, x) => a + x[1], 0).toFixed(3), ctx_time: +startAt.toFixed(4), output_latency_ms: audio.outputLatency ? +(audio.outputLatency * 1000).toFixed(1) : null, base_latency_ms: audio.baseLatency ? +(audio.baseLatency * 1000).toFixed(1) : null, audio_state: audio.state } };
+}
+function toneEvent(type, perf, info) {   // 鳴り始めの時刻で記録する（ev() の perf_ms などを上書き）
+  S.rec.events.push(ev(type, { ...info, perf_ms: +perf.toFixed(1), epoch_ms: +(performance.timeOrigin + perf).toFixed(1), wall_ms: wallMs(perf), called_perf_ms: +performance.now().toFixed(1) }));
+}
 async function runTimetable(sch) {
   const tok = S.rec, alive = () => S.rec === tok;
-  const t0 = performance.now();
+  // 開始の音：鳴り始めが進行表の t = 0（posture-lab はこの音を聞いて、同じ t = 0 から進む）
+  const tone = playTone('start'), t0 = tone.perf;
+  toneEvent('sync_tone_start', t0, tone.info);
   S.rec.timetableStart = { perf_ms: +t0.toFixed(1), wall_ms: wallMs(t0), protocolVersion: sch.protocolVersion, kind: sch.kind };
   S.rec.events.push(ev('timetable_start', { protocolVersion: sch.protocolVersion, kind: sch.kind, t0_perf_ms: +t0.toFixed(1), t0_wall_ms: wallMs(t0) }));
   setStage('prep', '準備', -1);
@@ -722,6 +743,9 @@ async function runTimetable(sch) {
     if (g.base === 'first') setBaseReference();
     if (bw) bw.finish();
   }
+  // 終了の音：t0 ＋ endToneAt に鳴らす（少し前に予約する）
+  await untilT(t0, sch.endToneAt - 0.3); if (!alive()) return;
+  const endTone = playTone('end', t0 + sch.endToneAt * 1000); toneEvent('sync_tone_end', endTone.perf, endTone.info);
   await untilT(t0, sch.endToneAt); if (!alive()) return;
   setStage('done', '終了', sch.segments.length);
   await untilT(t0, sch.stopAt); if (!alive()) return;
