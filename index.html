@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>CVAカメラ — 1人で側面からCVAを測る</title>
-<link rel="stylesheet" href="styles.css?v=0.6.1">
+<link rel="stylesheet" href="styles.css?v=0.7.0">
 </head>
 <body>
 <main>
 <header>
-  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.6.1</div><h1>CVAカメラ</h1></div>
+  <div><div class="eyebrow">SIDE-VIEW CVA CAMERA · 0.7.0</div><h1>CVAカメラ</h1></div>
   <span class="badge">実験用・未検証</span>
 </header>
 <p class="intro">体の横に置いたスマホのカメラで、耳珠・C7・肩峰の色マーカーを追跡し、CVAと渡邉角を記録します。1人で使えるように、撮影と記録開始にセルフタイマーと音声の案内があります。カメラの傾きは重力センサーで自動補正します。映像は、選んだときだけ端末に保存し、どこにも送信しません。</p>
@@ -90,10 +90,10 @@
       <div class="input-row">
         <label>開始までの待ち時間<select id="recTimer"><option value="0">すぐ</option><option value="3">3秒</option><option value="5" selected>5秒</option><option value="10">10秒</option></select></label>
         <label>進め方<select id="protocol"><option value="auto" selected>音声で姿勢を案内（自動）</option><option value="manual">手動でラベルを押す</option></select></label>
-        <label>案内の内容<select id="preset"><option value="stand">スタンド固定（posture-labと同時、本実験の主条件、16区間）</option><option value="dual">posture-labと同時（スマホを手に持つ、18区間）</option><option value="free">posture-vection-labと同時（自由記録：基準のあと、実験者が終了の合図を出す）</option><option value="basic" selected>CVAカメラだけ（7区間）</option></select></label>
-        <label>1姿勢の時間（秒）<input type="number" id="holdSec" min="3" max="60" value="10"></label>
-        <label>移行の時間（秒）<input type="number" id="transSec" min="0" max="15" value="3"></label>
-        <label class="check"><input type="checkbox" id="quickBase" checked> 途中の基準は、戻れたら次へ（本実験の手順：最初の基準±4°に2秒入ったら「ピッ」、5秒で声かけ、最長12秒／CVAカメラだけ：安定したら）</label>
+        <label>案内の内容<select id="preset"><option value="stand">固定（スタンド）：進行表 P-20261119、約6分（posture-labと同時、本実験の主条件）</option><option value="dual">手持ち：進行表 P-20261119、約6分半（posture-labと同時）</option><option value="free">posture-vection-labと同時（自由記録：基準のあと、実験者が終了の合図を出す）</option><option value="basic" selected>CVAカメラだけ（7区間）</option></select></label>
+        <label>1姿勢の時間（秒、進行表以外）<input type="number" id="holdSec" min="3" max="60" value="10"></label>
+        <label>移行の時間（秒、進行表以外）<input type="number" id="transSec" min="0" max="15" value="3"></label>
+        <label class="check"><input type="checkbox" id="quickBase" checked> 途中の基準は、安定したら次へ（「CVAカメラだけ」のとき）。固定・手持ちの進行表では、時間と移行は進行表で決まり、ここの設定は使いません（基準に戻れたかの「ピッ」と声かけは出ます）</label>
         <label>映像の保存<select id="vidMode"><option value="none" selected>しない（データのみ）</option><option value="overlay">計測結果を重ねた映像（発表用）</option><option value="raw">元の映像</option></select></label>
       </div>
       <p class="note" id="protocolNote">自動：うなずき → 基準 → うつむく → 基準 → 顎を突き出す → 基準 → 目線だけ下げる → 基準 → うなずき。姿勢の間には必ず基準（頭を楽な位置に戻す）が入ります。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。</p>
@@ -130,8 +130,9 @@
     </section>
   </div>
 </div>
-<footer>CVAカメラ 0.6.1 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
+<footer>CVAカメラ 0.7.0 / 研究用の試作。角度は2次元の側面投影で、マーカーの貼付位置とカメラの向きに依存します。</footer>
 </main>
-<script src="app.js?v=0.6.1"></script>
+<script src="protocol.js?v=0.7.0"></script>
+<script src="app.js?v=0.7.0"></script>
 </body>
 </html>

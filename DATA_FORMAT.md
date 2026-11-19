@@ -1,7 +1,21 @@
-# CVAカメラの記録の形式（0.6.0）
+# CVAカメラの記録の形式（0.7.0）
 
 対象：CVAカメラ 0.6.0（2026-11-15）。旧形式は 0.5.1、0.5.0（dual_test3）と 0.4.1（dual_test1・2）。
 **旧形式の列・キーは1つも消していません。** CSV の列（`rows`）は 0.4.1 と同じ並びで、0.5.1 で最後に `wall_ms` が1列増えました。0.6.0 では列は増えていません（`label` の値と `meta`・`events` のキーが増えただけ）。
+
+## 0.7.0 で増えたもの・変わったもの
+
+| どこ | キー | 中身 |
+|---|---|---|
+| `meta.protocol` | `protocolVersion` | 進行表の版 `"P-20261119"`（固定・手持ちのとき。ほかは `null`） |
+| `meta.protocol` | `timetable` | 進行表から計算した区間の一覧：`segments[]`（`label`・`stage`・`step`・`nod`・`base`・`screen`・`say`・`guideStart`・`transStart`・`holdStart`・`holdSec`・`end`、秒、開始の音から）、`endToneAt`・`stopAt`・`sec`（秒数の定数）・`tones` |
+| `meta.protocol` | `holdMs`・`transitionMs` | 進行表のときは `null`（`timetable` を見る） |
+| `events` | `timetable_start` | 進行表の時刻の起点 `t0_perf_ms`・`t0_wall_ms` |
+| `events` | `stage` の新しい値 | `stage = done`（終了の音から停止まで） |
+| `events` | `base_feedback` | `result` が `in_range`／`not_in_range`（`timeout` は使わない）。`fixed_length: true`、`in_range_ms`（移行の始まりから「ピッ」まで）。`ms` は移行＋区間の長さ（9000） |
+| `events` | `hold_end` | 進行表の基準では `reason = fixed` |
+
+区間の並びと step（0.7.0）：`stand` は step 0 基準(10)・1 自然・2 基準・3 うつむく・4 基準・5 顎・6 基準・7 猫背・8 基準・9 目線・10 基準・11 悪い姿勢・12 基準・13 読書(60)・14 基準・15 自然・16 基準、うなずきは step −1 と 17。`dual` は 11 端末だけ動かす が入り、うなずきは −1 と 19。**読書は 120 → 60秒、最後の自然のあとに基準が増えた**ので、0.6.x と step の番号がずれる（label で判断すること）。
 
 ## 0.6.0 で増えたもの・変わったもの
 

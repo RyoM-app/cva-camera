@@ -4,10 +4,11 @@
 // 0.3.0：案内中・移行中のラベル、うなずきの自動検出、重力センサーによる傾き補正、外カメラ、映像の保存（任意）
 // 0.4.0：姿勢の間に基準を挟む、posture-labとの同時計測用の案内、色の判定を厳しく（マーカー自身の色の幅から決める）、大きさの急変を除外、色の重なりの警告
 // 0.5.0：本実験用。被験者・条件・回の入力とファイル名、「スタンド固定」の案内、猫背、時計の組、画面の消灯防止、終了時の品質判定
+// 0.7.0：本実験の手順（stand・dual）を進行表（protocol.js、posture-lab と同じファイル）で固定の長さに。基準は6秒、最後のうなずきの前に基準、うなずきの声かけ
 // 0.6.0：手順に「自然」「悪い姿勢」「読書」を追加、声かけの変更（guidanceVersion 20261115）、途中の基準で戻れているかを音声で知らせる
 // 0.5.1：うなずきの検出を緩める（10°下がって深さの半分戻る、12秒）、1/2は「注意」、各行に wall_ms、固定の「うつむく」の声かけ
 // 角度の定義は cva_tracker.py（Python版）と同じ。
-const VERSION = '0.6.1';
+const VERSION = '0.7.0';
 // 終了時の品質判定（本実験の「事前に決める除外基準」に合わせる）。満たさなければ「やり直し推奨」
 const QUALITY = {
   minDetectionRate: 0.95,       // 耳珠・C7の検出率がこれ未満 → その回を除外
@@ -39,18 +40,10 @@ const SAY = {
   reading: '画面の文章を読んでください。姿勢は気にしなくて大丈夫です',
   free: '姿勢を正して、画面を見てください。そのあとは、画面の指示に従ってください',
 };
-// 本実験の手順（固定）：基準(10秒) → 自然(30秒) → 基準 → うつむく → 基準 → 顎 → 基準 → 猫背 → 基準 → 目線 → 基準 → 悪い姿勢(15秒) → 基準 → 読書(120秒) → 基準 → 自然(30秒)
-// 手持ちは「目線だけ下げる → 基準」の後に「端末だけ動かす → 基準」が入る
-function mainProtocol(c, postures) {
-  const B = ['基準', SAY[c].base];
-  return [
-    ['基準', SAY[c].base0, DURATION_SEC.firstBase], ['自然', SAY.natural, DURATION_SEC.natural], B,
-    ...postures.flatMap(p => [p, B]),
-    ['悪い姿勢', SAY.bad, DURATION_SEC.bad], B,
-    ['読書', SAY.reading, DURATION_SEC.reading], B,
-    ['自然', SAY.natural, DURATION_SEC.natural],
-  ];
-}
+// 0.7.0：本実験の手順（stand・dual）は進行表 protocol.js から作る（区間・秒数・声かけ。posture-lab も同じ表で進む）
+const PP = window.POSTURE_PROTOCOL;
+const TIMETABLE = { stand: PP.buildSchedule('stand'), dual: PP.buildSchedule('dual') };
+const fromTimetable = sch => sch.segments.filter(x => !x.nod).map(x => [x.label, x.say, x.holdSec]);
 const PRESETS = {
   basic: [
     ['基準', '楽な姿勢で、正面を見てください'],
@@ -58,19 +51,8 @@ const PRESETS = {
     ['顎を突き出す', '顎を前に突き出してください'], ['基準', BACK],
     ['目線だけ下げる', '頭は楽な位置のまま、目線だけを下げてください'], ['基準', BACK],
   ],
-  stand: mainProtocol('stand', [   // 本実験の主条件：posture-labのスマホをスタンドに固定して同時に計測する（16区間）
-    ['うつむく', '画面を見たまま、あごを引くようにうつむいてください'],
-    ['顎を突き出す', '画面を見たまま、顎を前に突き出してください'],
-    ['猫背', SAY.stand.slouch],
-    ['目線だけ下げる', '頭は動かさず、目線だけを下げてください'],
-  ]),
-  dual: mainProtocol('hand', [     // posture-labのスマホを手に持って同時に計測するとき（本実験の手持ちの回、18区間）
-    ['うつむく', 'スマホを胸の高さに下げて、うつむいて画面を見てください'],
-    ['顎を突き出す', 'スマホを胸の高さに下げて、顎を前に突き出して画面を見てください'],
-    ['猫背', SAY.hand.slouch],
-    ['目線だけ下げる', 'スマホを胸の高さに下げて、頭は動かさず、目線だけで画面を見てください'],
-    ['端末だけ動かす', '頭は動かさず、スマホだけをゆっくり上下に動かしてください'],
-  ]),
+  stand: fromTimetable(TIMETABLE.stand),   // 本実験の主条件：posture-labのスマホをスタンドに固定して同時に計測する（17区間＋うなずき2回）
+  dual: fromTimetable(TIMETABLE.dual),     // posture-labのスマホを手に持って同時に計測するとき（19区間＋うなずき2回）
 };
 // posture-vection-lab と同時に計測するとき：基準(10秒) → 実験者が「終了の合図へ」を押すまで自由に記録 → うなずき
 PRESETS.free = [['基準', SAY.free, DURATION_SEC.firstBase], ['ベクション実験', '画面の文章を読んでください。姿勢は自由です', 'manual']];
@@ -631,8 +613,9 @@ function startRec() {
   const auto = $('protocol').value === 'auto', hold = Math.max(3, +$('holdSec').value || 10) * 1000, trans = Math.max(0, +$('transSec').value || 0) * 1000, sec = +$('recTimer').value;
   if (sec) say('記録を始めます。写真と同じ位置で、正面を向いてください');
   countdown(sec, () => {
-    const preset = $('preset').value; PROTOCOL = PRESETS[preset].map(x => x[0]); SAYS = PRESETS[preset].map(x => x[1]); SECS = PRESETS[preset].map(x => x[2] ?? null);
-    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, guidanceVersion: preset === 'basic' ? null : GUIDANCE_VERSION, fixedSec: SECS, durationSec: DURATION_SEC, baseFeedback: preset === 'basic' || !$('quickBase').checked ? null : BASE_FB, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null } : null };
+    const preset = $('preset').value, sched = auto ? TIMETABLE[preset] ?? null : null; PROTOCOL = PRESETS[preset].map(x => x[0]); SAYS = PRESETS[preset].map(x => x[1]); SECS = PRESETS[preset].map(x => x[2] ?? null);
+    S.rec = { rows: [], events: [], t0: performance.now(), startedAt: new Date().toISOString(), protocol: auto ? { preset, steps: PROTOCOL, guidance: SAYS, guidanceVersion: preset === 'basic' ? null : GUIDANCE_VERSION, fixedSec: SECS, durationSec: DURATION_SEC, baseFeedback: preset === 'basic' || !$('quickBase').checked ? null : BASE_FB, holdMs: hold, transitionMs: trans, nod: NOD, quickBaseline: $('quickBase').checked && !sched ? { minMs: 5000, windowMs: 3000, rangeDeg: 2 } : null, protocolVersion: sched ? sched.protocolVersion : null, timetable: sched } : null };
+    if (sched) { S.rec.protocol.holdMs = S.rec.protocol.transitionMs = null; S.rec.protocol.baseFeedback = BASE_FB; }
     S.step = -1;
     if (auto) { S.stage = 'prep'; S.rowLabel = '準備'; } else { S.stage = 'manual'; S.rowLabel = S.label; }
     S.rec.subject = subj;
@@ -640,7 +623,7 @@ function startRec() {
     S.rec.events.push(ev('record_start'));
     startVideo();
     setPhase('recording'); $('recStatus').classList.add('on'); $('recStatus').textContent = '記録中…';
-    if (auto) runProtocol(hold, trans);
+    if (sched) runTimetable(sched); else if (auto) runProtocol(hold, trans);
   });
 }
 // 途中の基準：CVAが3秒間ほぼ一定（変動2°以内）になったら次へ。最短5秒、最長は1姿勢の時間。
@@ -664,7 +647,7 @@ async function holdBaseFeedback(step) {
   for (;;) {
     await sleep(100); if (!S.rec) return;
     const t = performance.now(), el = t - t0, r = S.rec.baseRef ?? ref, w = recent(t), v = w.filter(x => x.valid).map(x => x.cva_deg);
-    if (el >= BASE_FB.inMs && v.length >= 5 && v.length >= 0.8 * w.length && v.every(c => Math.abs(c - r) <= BASE_FB.tolDeg)) { beep(1500, 70); finish('in_range', el, v); return; }
+    if (el >= BASE_FB.inMs && v.length >= 5 && v.length >= 0.8 * w.length && v.every(c => Math.abs(c - r) <= BASE_FB.tolDeg)) { beep(1200, 70); finish('in_range', el, v); return; }
     if (el >= BASE_FB.maxMs) { finish('timeout', el, v); return; }
     if (!prompted && el >= BASE_FB.promptMs) { prompted = true; promptMs = Math.round(el); say(BASE_FB.prompt); }
   }
@@ -689,6 +672,61 @@ function waitFreeEnd() {
     btn.hidden = false; btn.onclick = () => done('operator');
     S.timers.push(setTimeout(() => done('timeout_30min'), 30 * 60 * 1000));
   });
+}
+// ---------------------------------------------------------------- 進行表で進める（0.7.0、stand・dual）
+// 区間の開始時刻は t0（開始の音の鳴り始め）＋ 進行表の秒。待つたびに「目標の時刻まで」寝るので、誤差がたまらない
+const untilT = (t0, sec) => sleep(Math.max(0, t0 + sec * 1000 - performance.now()));
+// 途中の基準の「戻れたか」：移行の始まりから見て、±tolDeg に inMs 続いたら「ピッ」（1回だけ）。promptMs で入っていなければ1回だけ声をかける。区間の長さは変えない
+function watchBase(step, fromT, endT) {
+  const w = { step, fromT, endT, inRangeMs: null, prompted: false, promptMs: null };
+  const id = setInterval(() => {
+    if (!S.rec) { clearInterval(id); return; }
+    const t = performance.now(), r = S.rec.baseRef;
+    if (t >= endT || r === null || r === undefined) return;
+    const rows = S.rec.rows.filter(x => x.perf_ms >= Math.max(fromT, t - BASE_FB.inMs)), v = rows.filter(x => x.valid).map(x => x.cva_deg);
+    if (w.inRangeMs === null && t - fromT >= BASE_FB.inMs && v.length >= 5 && v.length >= 0.8 * rows.length && v.every(c => Math.abs(c - r) <= BASE_FB.tolDeg)) { w.inRangeMs = Math.round(t - fromT); beep(1200, 70); }
+    if (w.inRangeMs === null && !w.prompted && t - fromT >= BASE_FB.promptMs) { w.prompted = true; w.promptMs = Math.round(t - fromT); say(BASE_FB.prompt); }
+  }, 100);
+  S.timers.push(id);
+  w.finish = () => {
+    clearInterval(id); if (!S.rec) return;
+    const r = S.rec.baseRef, last = S.rec.rows.filter(x => x.perf_ms >= endT - BASE_FB.inMs && x.perf_ms <= endT && x.valid).map(x => x.cva_deg), m = median(last);
+    S.rec.events.push(ev('base_feedback', { step, result: w.inRangeMs !== null ? 'in_range' : 'not_in_range', fixed_length: true, in_range_ms: w.inRangeMs, prompted: w.prompted, prompt_ms: w.promptMs,
+      ref_cva: r === null || r === undefined ? null : +r.toFixed(2), cva_deg: m === null ? null : +m.toFixed(2), diff_deg: m === null || r == null ? null : +(m - r).toFixed(2), ms: Math.round(endT - fromT), tol_deg: BASE_FB.tolDeg }));
+    S.rec.events.push(ev('hold_end', { step, reason: 'fixed', ms: Math.round(endT - fromT) }));
+  };
+  return w;
+}
+async function runTimetable(sch) {
+  const tok = S.rec, alive = () => S.rec === tok;
+  const t0 = performance.now();
+  S.rec.timetableStart = { perf_ms: +t0.toFixed(1), wall_ms: wallMs(t0), protocolVersion: sch.protocolVersion, kind: sch.kind };
+  S.rec.events.push(ev('timetable_start', { protocolVersion: sch.protocolVersion, kind: sch.kind, t0_perf_ms: +t0.toFixed(1), t0_wall_ms: wallMs(t0) }));
+  setStage('prep', '準備', -1);
+  for (const g of sch.segments) {
+    await untilT(t0, g.guideStart); if (!alive()) return;
+    if (g.nod) {
+      setStage('nod', 'うなずき', g.step); beep(1000, 200); S.rec.events.push(ev('sync_cue', { which: g.nod })); say(g.say);
+      const found = await Promise.race([startNodWatch(g.nod), untilT(t0, g.end).then(() => false)]);
+      if (!found && S.nodWatch) { const w = S.nodWatch; S.rec.events.push(ev('nod_timeout', { which: g.nod, base_cva: w.base === null ? null : +w.base.toFixed(2), min_cva: Number.isFinite(w.min) ? +w.min.toFixed(2) : null })); S.nodWatch = null; }
+      await untilT(t0, g.end); if (!alive()) return;
+      continue;
+    }
+    setStage('guide', '案内中', g.step); beep(880, 150); say(g.say);
+    await untilT(t0, g.transStart); if (!alive()) return;
+    setStage('transition', '移行中', g.step);
+    const bw = g.base === 'middle' ? watchBase(g.step, t0 + g.transStart * 1000, t0 + g.end * 1000) : null;
+    await untilT(t0, g.holdStart); if (!alive()) return;
+    setStage('hold', g.label, g.step);
+    await untilT(t0, g.end); if (!alive()) return;
+    if (g.base === 'first') setBaseReference();
+    if (bw) bw.finish();
+  }
+  await untilT(t0, sch.endToneAt); if (!alive()) return;
+  setStage('done', '終了', sch.segments.length);
+  await untilT(t0, sch.stopAt); if (!alive()) return;
+  const nods = S.rec.events.filter(e => e.type === 'nod_detected').length;
+  stopRec(`進行表の最後まで進みました（うなずき検出 ${nods}/2）。保存してください。`);
 }
 // 自動の案内：準備 → うなずき（検出まで）→［案内中 → 移行中 → 姿勢］×5 → うなずき（検出まで）→ 終了
 async function runProtocol(hold, trans) {
@@ -768,6 +806,8 @@ $('recBtn').onclick = () => (S.phase === 'recording' || S.phase === 'countdown')
 $('syncBtn').onclick = () => { if (S.rec) { S.rec.events.push(ev('sync')); setStatus('同期の合図を記録しました。'); } };
 function protocolNote() {
   if ($('protocol').value !== 'auto') { $('protocolNote').textContent = '手動：姿勢を変えるたびにラベルを押してください。記録停止も手動です。'; return; }
+  const sch = TIMETABLE[$('preset').value];
+  if (sch) { $('protocolNote').textContent = `進行表 ${sch.protocolVersion}（${PP.NAMES[sch.kind]}）：${sch.segments.map(x => x.nod ? 'うなずき' : `${x.label}(${x.holdSec})`).join(' → ')}。区間の長さは固定（案内${sch.sec.guide}秒＋移行${sch.sec.trans}秒＋区間）。全${Math.floor(sch.total / 60)}分${Math.round(sch.total % 60)}秒。posture-lab でも同じ進行表を選んでください。`; return; }
   const steps = PRESETS[$('preset').value].map(x => x[0]);
   $('protocolNote').textContent = `自動：うなずき → ${steps.join(' → ')} → うなずき（姿勢と基準で${steps.length}区間）。姿勢の間には必ず基準が入ります。うなずきを検出したら次へ進み、最後のうなずきを検出したら終わります。`;
 }
